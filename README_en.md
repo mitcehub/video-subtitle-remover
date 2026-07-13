@@ -10,7 +10,6 @@ It mainly implements the following functionalities:
 - Lossless resolution removal of hardcoded subtitles from videos
 - AI-powered inpainting to fill removed subtitle areas
 - Custom subtitle position selection
-- Batch watermark removal from images
 - Visual subtitle area selection by dragging on video preview
 - Real-time original/result comparison during processing
 - Timeline editing with track-based precise control

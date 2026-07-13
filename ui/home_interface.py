@@ -664,6 +664,8 @@ class HomeInterface(QWidget):
     def stop_button_clicked(self):
         try:
             self._stop_event.set()
+            self.append_output(tr['Main']['StopProcessing'])
+            logger.info('user_stop_processing')
             # Directly kill child process by PID
             if self._proc_pid is not None:
                 try:

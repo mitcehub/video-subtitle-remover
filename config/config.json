@@ -20,8 +20,8 @@
         "Interface": "ch",
         "Height": 900,
         "Width": 1495,
-        "X": 238,
-        "Y": 94
+        "X": 200,
+        "Y": 124
     },
     "Sttn": {
         "MaxLoadNum": 50,

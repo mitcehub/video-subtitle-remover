@@ -12,7 +12,7 @@ from qfluentwidgets import (ScrollArea, ExpandLayout, CardWidget, SubtitleLabel,
                            MessageBox)
 from infra.config import config, tr, VERSION
 
-PROJECT_URL = "https://github.com/YaoFANGUK/video-subtitle-remover"
+PROJECT_URL = "https://github.com/mitcehub/video-subtitle-remover"
 
 class AdvancedSettingInterface(ScrollArea):
     """高级设置页面"""

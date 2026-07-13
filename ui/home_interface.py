@@ -663,10 +663,15 @@ class HomeInterface(QWidget):
     def stop_button_clicked(self):
         try:
             self._stop_event.set()
+            ProcessManager.instance().terminate_all()
             if self._pipeline:
                 self._pipeline.stop()
         finally:
             self._worker_thread = None
+            self.video_display_component.hide_status()
+            self.video_display_component.set_dragger_enabled(True)
+            self.timeline.setEnabled(True)
+            self._set_playback_buttons_enabled(True)
             self.run_button.setVisible(True)
             self.stop_button.setVisible(False)
 

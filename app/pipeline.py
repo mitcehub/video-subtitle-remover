@@ -56,7 +56,8 @@ class ProcessingPipeline:
             self.running_process = process
             process.start()
             ProcessManager.instance().add_process(process)
-            process.join()
+            while process.is_alive():
+                process.join(timeout=0.5)
             logger.info('subprocess_exit: exitcode=%d', process.exitcode)
         finally:
             caller.stop()

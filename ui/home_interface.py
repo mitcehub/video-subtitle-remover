@@ -70,6 +70,7 @@ class HomeInterface(QWidget):
         self._result_frame = None
         self._preview_decoder = None
         self._preview_queue = queue.Queue(maxsize=2)
+        self._proc_pid = None
 
         self.__init_widgets()
         self._playback = PlaybackController(self)
@@ -663,10 +664,19 @@ class HomeInterface(QWidget):
     def stop_button_clicked(self):
         try:
             self._stop_event.set()
+            # Directly kill child process by PID
+            if self._proc_pid is not None:
+                try:
+                    import subprocess
+                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(self._proc_pid)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                except Exception:
+                    pass
             ProcessManager.instance().terminate_all()
             if self._pipeline:
                 self._pipeline.stop()
         finally:
+            self._proc_pid = None
             self._worker_thread = None
             self.video_display_component.hide_status()
             self.video_display_component.set_dragger_enabled(True)
@@ -695,7 +705,10 @@ class HomeInterface(QWidget):
             on_log = self.append_log_signal.emit
             on_preview = self.update_preview_with_comp_signal.emit
             on_error = self.task_error_signal.emit
-        return self._pipeline.start(video_path, output_path, options, Callbacks())
+        result = self._pipeline.start(video_path, output_path, options, Callbacks())
+        if result and hasattr(result, 'pid'):
+            self._proc_pid = result.pid
+        return result
 
     # ==================== 进度 / 日志 / 错误 ====================
 

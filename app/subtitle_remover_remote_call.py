@@ -1,3 +1,5 @@
+"""远程调用封装：多进程环境下的回调函数传递。"""
+
 import multiprocessing
 import threading
 import logging
@@ -6,12 +8,14 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
+
 class Command(Enum):
     FINISH = 0
     PROGRESS = 1
     LOG = 2
     ERROR = 3
     UPDATE_PREVIEW_WITH_COMP = 4
+
 
 class SubtitleRemoverRemoteCall:
     """

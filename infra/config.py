@@ -68,7 +68,7 @@ class Config(QConfig):
     sttnReferenceLength = RangeConfigItem("Sttn", "ReferenceLength", 10, RangeValidator(1, 100))
     sttnMaxLoadNum = RangeConfigItem("Sttn", "MaxLoadNum", 50, RangeValidator(1, 300))
 
-    def getSttnMaxLoadNum(self):
+    def get_sttn_max_load_num(self):
         return max(self.sttnMaxLoadNum.value, self.sttnNeighborStride.value * self.sttnReferenceLength.value)
 
     useBestRatioConstraint = ConfigItem("Main", "UseBestRatioConstraint", False, BoolValidator())
@@ -91,3 +91,5 @@ qconfig.load(CONFIG_FILE, config)
 tr = configparser.ConfigParser()
 TRANSLATION_FILE = os.path.join(BASE_DIR, 'config', 'translations', f"{config.interface.value}.ini")
 tr.read(TRANSLATION_FILE, encoding='utf-8')
+if not tr.sections():
+    logger.warning('translation_file_empty_or_missing: %s', TRANSLATION_FILE)

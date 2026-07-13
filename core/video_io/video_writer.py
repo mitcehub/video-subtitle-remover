@@ -87,9 +87,11 @@ class FFmpegVideoWriter:
         if missing <= 0:
             return
         logger.info('video_writer_padding: missing=%d, before=%d, target=%d', missing, self._frames_written, target_count)
+        # 缓存 tobytes 避免循环内重复序列化
+        frame_bytes = self._last_frame.tobytes()
         for _ in range(missing):
             try:
-                self._process.stdin.write(self._last_frame.tobytes())
+                self._process.stdin.write(frame_bytes)
             except BrokenPipeError:
                 logger.warning('video_writer_pad_error: padded=%d', self._frames_written - (target_count - missing))
                 break

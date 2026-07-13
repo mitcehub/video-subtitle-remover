@@ -4,25 +4,32 @@ import os
 import re
 import shutil
 import stat
+import platform
 import threading
 import logging
 import subprocess
 import tempfile
 import traceback
 
-import platform
 from infra.utils import get_readable_path
 from infra.config import BASE_DIR
 
 logger = logging.getLogger(__name__)
+
+# 超时常量（秒）
+FFMPEG_VERSION_TIMEOUT = 5
+FFMPEG_PROBE_TIMEOUT = 60
+FFMPEG_LONG_TIMEOUT = 600
+
+# 拒绝 shell 注入字符：; | & ` $ ( ) \n \r ! \0
+_PATH_DANGER_CHARS = re.compile(r'[;|&`$()\n\r!\x00]')
 
 
 def _validate_path(path):
     """校验文件路径，防止命令注入。拒绝包含 shell 元字符的路径。"""
     if not path or not isinstance(path, str):
         raise ValueError(f"Invalid path: {path!r}")
-    # 拒绝明显的 shell 注入字符
-    if re.search(r'[;|&`$]', path):
+    if _PATH_DANGER_CHARS.search(path):
         raise ValueError(f"Path contains potentially dangerous characters: {path!r}")
     return path
 
@@ -50,7 +57,7 @@ class FFmpegCLI:
             pass
         version_info = 'unknown'
         try:
-            result = subprocess.run([path, '-version'], capture_output=True, text=True, timeout=5)
+            result = subprocess.run([path, '-version'], capture_output=True, text=True, timeout=FFMPEG_VERSION_TIMEOUT)
             version_info = result.stdout.split('\n')[0] if result.stdout else 'unknown'
         except Exception as e:
             logger.warning('ffmpeg_version_check_failed: %s', e)
@@ -60,11 +67,11 @@ class FFmpegCLI:
     def ffmpeg_path(self):
         system = platform.system()
         if system == "Windows":
-            bundled = os.path.join(BASE_DIR, 'core', 'io', 'ffmpeg', 'win_x64', 'ffmpeg.exe')
+            bundled = os.path.join(BASE_DIR, 'core', 'video_io', 'ffmpeg', 'win_x64', 'ffmpeg.exe')
         elif system == "Linux":
-            bundled = os.path.join(BASE_DIR, 'core', 'io', 'ffmpeg', 'linux_x64', 'ffmpeg')
+            bundled = os.path.join(BASE_DIR, 'core', 'video_io', 'ffmpeg', 'linux_x64', 'ffmpeg')
         else:
-            bundled = os.path.join(BASE_DIR, 'core', 'io', 'ffmpeg', 'macos', 'ffmpeg')
+            bundled = os.path.join(BASE_DIR, 'core', 'video_io', 'ffmpeg', 'macos', 'ffmpeg')
 
         if os.path.exists(bundled):
             return bundled
@@ -85,7 +92,7 @@ class FFmpegCLI:
             _validate_path(safe_path)
             result = subprocess.run(
                 [self.ffmpeg_path, '-i', safe_path, '-map', '0:v:0', '-c', 'copy', '-f', 'null', '-'],
-                capture_output=True, timeout=600
+                capture_output=True, timeout=FFMPEG_LONG_TIMEOUT
             )
             stderr_text = result.stderr.decode('utf-8', errors='replace')
             last_frame = None
@@ -109,7 +116,7 @@ def _video_has_audio_stream(ffmpeg_path, video_path):
         # 以默认级别扫描，解析 stderr 中的 "Audio:" 行判断是否含音频流
         result = subprocess.run(
             [ffmpeg_path, "-i", video_path],
-            capture_output=True, timeout=60
+            capture_output=True, timeout=FFMPEG_PROBE_TIMEOUT
         )
         text = result.stderr.decode('utf-8', errors='replace')
         return 'Audio:' in text
@@ -149,7 +156,7 @@ def merge_audio_to_video(video_path, video_out_path, output_path, ffmpeg_path):
     use_shell = False
     logger.info('audio_extract_start: %s', video_path)
     try:
-        subprocess.check_output(audio_extract_command, stdin=subprocess.DEVNULL, shell=use_shell, timeout=600)
+        subprocess.check_output(audio_extract_command, stdin=subprocess.DEVNULL, shell=use_shell, timeout=FFMPEG_LONG_TIMEOUT)
         logger.info('audio_extract_success')
     except subprocess.CalledProcessError as e:
         raw = e.stderr or b''
@@ -179,7 +186,7 @@ def merge_audio_to_video(video_path, video_out_path, output_path, ffmpeg_path):
                                    "-acodec", "copy",
                                    "-loglevel", "error", output_path]
             try:
-                subprocess.check_output(audio_merge_command, stdin=subprocess.DEVNULL, shell=use_shell, timeout=600)
+                subprocess.check_output(audio_merge_command, stdin=subprocess.DEVNULL, shell=use_shell, timeout=FFMPEG_LONG_TIMEOUT)
                 logger.info('audio_merge_success')
                 return True
             except Exception as e:
@@ -189,9 +196,13 @@ def merge_audio_to_video(video_path, video_out_path, output_path, ffmpeg_path):
         logger.warning('audio_merge_skipped: temp not found %s', video_out_path)
         return False
     finally:
+        # 必须先关闭句柄再删除文件，否则 Windows 上会 PermissionError
+        try:
+            temp.close()
+        except Exception:
+            pass
         if os.path.exists(temp.name):
             try:
                 os.remove(temp.name)
             except Exception:
                 pass
-        temp.close()

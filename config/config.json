@@ -19,13 +19,13 @@
     "Window": {
         "Interface": "ch",
         "Height": 900,
-        "Width": 1495,
-        "X": 221,
-        "Y": 77
+        "Width": 1400,
+        "X": 281,
+        "Y": 69
     },
     "Sttn": {
-        "MaxLoadNum": 120,
-        "NeighborStride": 3,
-        "ReferenceLength": 5
+        "MaxLoadNum": 50,
+        "NeighborStride": 5,
+        "ReferenceLength": 10
     }
 }

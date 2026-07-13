@@ -63,7 +63,7 @@ class VideoDisplayComponent(QWidget):
         self._coord_mapper = CoordinateMapper()
 
         self.__init_widgets()
-        self.__init_shotcuts()
+        self.__init_shortcuts()
         
     def __init_widgets(self):
         """初始化组件"""
@@ -110,7 +110,7 @@ class VideoDisplayComponent(QWidget):
         }))
         self.video_slider.hide()
     
-    def __init_shotcuts(self):
+    def __init_shortcuts(self):
         """初始化快捷键"""
         self.shortcut_delete_selection = QShortcut(QtGui.QKeySequence.StandardKey.Delete, self)
         self.shortcut_delete_selection.activated.connect(self.__handle_delete_selection)

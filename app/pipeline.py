@@ -5,10 +5,15 @@ import multiprocessing
 import traceback
 
 from core.subtitle_remover import SubtitleRemover, ProcessingCallbacks
-from ui.subtitle_remover_remote_call import SubtitleRemoverRemoteCall
+from app.subtitle_remover_remote_call import SubtitleRemoverRemoteCall
 from infra.process_manager import ProcessManager
 
 logger = logging.getLogger(__name__)
+
+# 允许通过 options setattr 落地的属性白名单，防止覆盖关键属性
+_ALLOWED_OPTION_KEYS = frozenset({
+    'sub_areas', 'ab_sections', 'track_data', 'video_out_path',
+})
 
 
 def remover_process(queue, video_path, output_path, options):
@@ -23,7 +28,10 @@ def remover_process(queue, video_path, output_path, options):
         sr = SubtitleRemover(video_path, True, callbacks=callbacks)
         sr.video_out_path = output_path
         for key, value in options.items():
-            setattr(sr, key, value)
+            if key in _ALLOWED_OPTION_KEYS:
+                setattr(sr, key, value)
+            else:
+                logger.warning('option_key_not_allowed: %s', key)
         sr.run()
     except Exception as e:
         traceback.print_exc()
@@ -56,11 +64,11 @@ class ProcessingPipeline:
             self.running_process = process
             process.start()
             ProcessManager.instance().add_process(process)
-            while process.is_alive():
-                process.join(timeout=0.5)
+            process.join()
             logger.info('subprocess_exit: exitcode=%d', process.exitcode)
         finally:
             caller.stop()
+            ProcessManager.instance().remove_process(f"Process:{id(process)}")
         return process
 
     def stop(self):

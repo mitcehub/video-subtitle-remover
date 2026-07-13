@@ -29,7 +29,7 @@ class PlaybackController:
 
     def play(self):
         fps = self.parent.fps or 30
-        interval = max(8, int(1000 / fps // self._playback_speed))
+        interval = max(8, int(round(1000 / fps / self._playback_speed)))
         self._playback_timer.setInterval(interval)
         self._playback_timer.start()
         self._is_playing = True
@@ -52,7 +52,7 @@ class PlaybackController:
         self.parent.speed_btn.setToolTip(tr['Main']['PlaySpeedCurrent'].format(self._playback_speed))
         if self._is_playing:
             fps = self.parent.fps or 30
-            interval = max(8, int(1000 / fps // self._playback_speed))
+            interval = max(8, int(round(1000 / fps / self._playback_speed)))
             self._playback_timer.setInterval(interval)
 
     def step_forward(self):

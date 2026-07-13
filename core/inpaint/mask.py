@@ -4,6 +4,11 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# mask 扩展像素（向四周扩展，确保覆盖字幕边缘）
+MASK_DEVIATION = 10
+# 过滤小连通域的最小面积阈值
+MIN_ISLAND_AREA = 10
+
 
 def create_mask(size, coords_list):
     """根据坐标列表生成 mask。
@@ -13,18 +18,18 @@ def create_mask(size, coords_list):
         coords_list: 坐标列表，每个元素为 (ymin, ymax, xmin, xmax)
     """
     mask = np.zeros(size, dtype="uint8")
-    deviation = 10
     if coords_list:
         for coords in coords_list:
             ymin, ymax, xmin, xmax = coords
-            x1 = max(0, xmin - deviation)
-            y1 = max(0, ymin - deviation)
-            x2 = xmax + deviation
-            y2 = ymax + deviation
+            x1 = max(0, xmin - MASK_DEVIATION)
+            y1 = max(0, ymin - MASK_DEVIATION)
+            x2 = xmax + MASK_DEVIATION
+            y2 = ymax + MASK_DEVIATION
             cv2.rectangle(mask, (x1, y1), (x2, y2), (255, 255, 255), thickness=-1)
     area_px = int(np.sum(mask > 0))
     total_px = size[0] * size[1]
-    logger.info('create_mask: boxes=%d, area=%d, coverage=%.6f', len(coords_list), area_px, area_px / total_px)
+    coverage = area_px / total_px if total_px > 0 else 0.0
+    logger.info('create_mask: boxes=%d, area=%d, coverage=%.6f', len(coords_list), area_px, coverage)
     return mask
 
 
@@ -48,7 +53,10 @@ def get_inpaint_area_by_mask(W, H, h, mask, multiple=1):
     if np.all(mask == 0):
         return inpaint_area
 
+    # 确保 mask 是 2D（主流程可能传入 (H,W,1)）
     binary_mask = (mask > 0).astype(np.uint8) * 255
+    if binary_mask.ndim == 3:
+        binary_mask = binary_mask[:, :, 0]
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
 
@@ -60,7 +68,7 @@ def get_inpaint_area_by_mask(W, H, h, mask, multiple=1):
         height = stats[i, cv2.CC_STAT_HEIGHT]
         area = stats[i, cv2.CC_STAT_AREA]
 
-        if area < 10:
+        if area < MIN_ISLAND_AREA:
             continue
 
         center_y = int(centroids[i][1])
@@ -73,19 +81,18 @@ def get_inpaint_area_by_mask(W, H, h, mask, multiple=1):
 
     merged_islands = []
     current_group = [island_info[0]]
+    cur_min_y = island_info[0][0]
+    cur_max_y = island_info[0][1]
 
     for i in range(1, len(island_info)):
-        min_y = min([island[0] for island in current_group])
-        max_y = max([island[1] for island in current_group])
-
         top_y, bottom_y, center_y, _, _ = island_info[i]
 
-        new_min_y = min(min_y, top_y)
-        new_max_y = max(max_y, bottom_y)
+        new_min_y = min(cur_min_y, top_y)
+        new_max_y = max(cur_max_y, bottom_y)
 
         has_connection = False
-        if max_y < top_y:
-            middle_region = binary_mask[max_y:top_y, :]
+        if cur_max_y < top_y:
+            middle_region = binary_mask[cur_max_y:top_y, :]
             if np.any(middle_region > 0):
                 has_connection = True
         else:
@@ -93,9 +100,13 @@ def get_inpaint_area_by_mask(W, H, h, mask, multiple=1):
 
         if new_max_y - new_min_y <= h and has_connection:
             current_group.append(island_info[i])
+            cur_min_y = new_min_y
+            cur_max_y = new_max_y
         else:
             merged_islands.append(current_group)
             current_group = [island_info[i]]
+            cur_min_y = top_y
+            cur_max_y = bottom_y
 
     merged_islands.append(current_group)
 

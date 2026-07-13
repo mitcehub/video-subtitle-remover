@@ -22,8 +22,14 @@ from infra.hardware import HardwareAccelerator
 
 logger = logging.getLogger(__name__)
 
+# STTN 模型输入尺寸
 MODEL_W = 648
 MODEL_H = 120
+# split_h 计算系数：split_h = int(W * SPLIT_H_RATIO / SPLIT_H_DIVISOR)
+SPLIT_H_NUMERATOR = 3
+SPLIT_H_DENOMINATOR = 16
+# GC 间隔：每 N 个 chunk 执行一次 gc.collect + empty_cache
+GC_INTERVAL = 10
 
 
 # ============================================================================
@@ -52,9 +58,9 @@ class Attention(nn.Module):
 
 
 class MultiHeadedAttention(nn.Module):
-    def __init__(self, patchsize, d_model):
+    def __init__(self, patch_size, d_model):
         super().__init__()
-        self.patchsize = patchsize
+        self.patch_size = patch_size
         self.query_embedding = nn.Conv2d(d_model, d_model, kernel_size=1, padding=0)
         self.value_embedding = nn.Conv2d(d_model, d_model, kernel_size=1, padding=0)
         self.key_embedding = nn.Conv2d(d_model, d_model, kernel_size=1, padding=0)
@@ -66,15 +72,15 @@ class MultiHeadedAttention(nn.Module):
     def forward(self, x, m, b, c):
         bt, _, h, w = x.size()
         t = bt // b
-        d_k = c // len(self.patchsize)
+        d_k = c // len(self.patch_size)
         output = []
         _query = self.query_embedding(x)
         _key = self.key_embedding(x)
         _value = self.value_embedding(x)
-        for (width, height), query, key, value in zip(self.patchsize,
-                                                      torch.chunk(_query, len(self.patchsize), dim=1),
-                                                      torch.chunk(_key, len(self.patchsize), dim=1),
-                                                      torch.chunk(_value, len(self.patchsize), dim=1)):
+        for (width, height), query, key, value in zip(self.patch_size,
+                                                      torch.chunk(_query, len(self.patch_size), dim=1),
+                                                      torch.chunk(_key, len(self.patch_size), dim=1),
+                                                      torch.chunk(_value, len(self.patch_size), dim=1)):
             out_w, out_h = w // width, h // height
             mm = m.view(b, t, 1, out_h, height, out_w, width)
             mm = mm.permute(0, 1, 3, 5, 2, 4, 6).contiguous().view(b, t * out_h * out_w, height * width)
@@ -146,8 +152,8 @@ class SubtitleRemovalGenerator(nn.Module):
     def __init__(self):
         super().__init__()
         channel = 256
-        patchsize = [(162, 30), (54, 10), (18, 6), (6, 3)]
-        self.transformer = nn.Sequential(*[TransformerBlock(patchsize, hidden=channel) for _ in range(8)])
+        patch_size = [(162, 30), (54, 10), (18, 6), (6, 3)]
+        self.transformer = nn.Sequential(*[TransformerBlock(patch_size, hidden=channel) for _ in range(8)])
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 64, 3, 2, 1), nn.LeakyReLU(0.2, True),
             nn.Conv2d(64, 64, 3, 1, 1), nn.LeakyReLU(0.2, True),
@@ -184,7 +190,7 @@ class STTNInpaint:
         _, mask = cv2.threshold(input_mask, 127, 1, cv2.THRESH_BINARY)
         mask = mask[:, :, None]
         H, W = mask.shape[:2]
-        split_h = int(W * 3 / 16)
+        split_h = int(W * SPLIT_H_NUMERATOR / SPLIT_H_DENOMINATOR)
         inpaint_area = get_inpaint_area_by_mask(W, H, split_h, mask)
         frames_hr = [f.copy() for f in input_frames]
         frames_scaled = {}
@@ -248,7 +254,7 @@ class STTNInpaint:
                     np_out = output[i].cpu().permute(1, 2, 0).numpy() * 0.5 + 0.5
                     np_prior = (prior_np[i] > 0.5).astype(np.float32)[..., None]
                     blended = np_prior * np_out + (1 - np_prior) * rgb_frames[idx]
-                    blended = blended.clip(0, 1).astype(np.float64)
+                    blended = blended.clip(0, 1).astype(np.float32)
                     if comp_frames[idx] is None:
                         comp_frames[idx] = blended
                         weights[idx] = 1
@@ -271,11 +277,13 @@ class STTNAutoInpaint:
             os.path.dirname(os.path.abspath(video_path)),
             f"{os.path.basename(video_path).rsplit('.', 1)[0]}_no_sub.mp4"
         )
-        self.clip_gap = clip_gap or config.getSttnMaxLoadNum()
+        self.clip_gap = clip_gap or config.get_sttn_max_load_num()
 
     def __call__(self, input_mask=None, input_sub_remover=None, tbar=None, gui_mode=False):
         reader = None
         writer = None
+        prefetcher = None
+        total_written = 0
         try:
             reader = create_video_capture(self.video_path)
             prefetcher = FramePrefetcher(reader)
@@ -296,11 +304,11 @@ class STTNAutoInpaint:
                 writer = cv2.VideoWriter(self.video_out_path, cv2.VideoWriter_fourcc(*"mp4v"),
                                          frame_info['fps'], (frame_info['W'], frame_info['H']))
 
-            split_h = int(frame_info['W'] * 3 / 16)
+            split_h = int(frame_info['W'] * SPLIT_H_NUMERATOR / SPLIT_H_DENOMINATOR)
             if input_mask is None:
+                # 无 mask 时用空 mask（主流程总会传入 input_mask）
                 _, global_mask = cv2.threshold(
-                    cv2.imread(self.sttn_inpaint.mask_path, 0) if hasattr(self, 'mask_path') and self.mask_path
-                    else np.zeros((frame_info['H'], frame_info['W']), dtype=np.uint8),
+                    np.zeros((frame_info['H'], frame_info['W']), dtype=np.uint8),
                     127, 1, cv2.THRESH_BINARY)
                 global_mask = global_mask[:, :, None]
             else:
@@ -311,7 +319,7 @@ class STTNAutoInpaint:
 
             effective_gap = self.clip_gap
             vram = HardwareAccelerator.instance().get_available_vram_mb()
-            if vram > 0:
+            if vram > 0 and frame_info['W'] > 0 and frame_info['H'] > 0:
                 max_frames = max(int(vram * 1024 * 1024 / (frame_info['W'] * frame_info['H'] * 12)), 10)
                 effective_gap = min(effective_gap, max_frames)
 
@@ -400,14 +408,15 @@ class STTNAutoInpaint:
                 if read_failed:
                     break
                 del frames_hr, frames, comps
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                if i % GC_INTERVAL == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
         except Exception as e:
             logger.error('sttn_process_error: %s', e)
             raise
         finally:
-            if reader:
+            if prefetcher is not None:
                 prefetcher.release()
             if writer and input_sub_remover is None:
                 writer.release()

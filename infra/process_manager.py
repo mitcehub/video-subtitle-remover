@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 class ProcessManager:
+    """单例进程管理器，线程安全地管理子进程生命周期。"""
+
     _instance = None
     _instance_lock = threading.Lock()
 
@@ -24,33 +26,40 @@ class ProcessManager:
 
     def __init__(self):
         self.processes = {}
+        self._lock = threading.RLock()
         atexit.register(self.terminate_all)
 
     def add_process(self, process, name=None):
+        """注册子进程到管理器。"""
         if process is None:
             return
         process_id = name or f"Process:{id(process)}"
-        self.processes[process_id] = process
+        with self._lock:
+            self.processes[process_id] = process
         logger.info('process_add: id=%s, pid=%s', process_id, getattr(process, 'pid', None))
         return process_id
 
     def remove_process(self, process_id):
-        if process_id in self.processes:
-            del self.processes[process_id]
-            logger.info('process_remove: id=%s', process_id)
-            return True
+        """从管理器移除指定进程记录。"""
+        with self._lock:
+            if process_id in self.processes:
+                del self.processes[process_id]
+                logger.info('process_remove: id=%s', process_id)
+                return True
         return False
 
     def terminate_all(self):
-        logger.info('process_terminate_all: count=%d', len(self.processes))
+        """终止所有已注册的子进程。"""
+        with self._lock:
+            items = list(self.processes.items())
+            self.processes.clear()
+        logger.info('process_terminate_all: count=%d', len(items))
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = []
-            for _, process in list(self.processes.items()):
-                futures.append(executor.submit(self.terminate_by_process, process))
+            futures = [executor.submit(self.terminate_by_process, proc) for _, proc in items]
             concurrent.futures.wait(futures)
-        self.processes.clear()
 
     def terminate_by_process(self, process):
+        """终止指定进程并从管理器移除。"""
         if process is None:
             return
         try:
@@ -72,8 +81,12 @@ class ProcessManager:
             logger.warning('terminate_error: %s', e)
         if process.pid is not None:
             self.terminate_by_pid(process.pid)
+        # 从管理器移除
+        process_id = f"Process:{id(process)}"
+        self.remove_process(process_id)
 
     def terminate_by_pid(self, pid):
+        """通过 PID 终止进程。"""
         try:
             if platform.system() == 'Windows':
                 subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)],

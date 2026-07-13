@@ -54,16 +54,16 @@ logging.getLogger('torch').setLevel(logging.WARNING)
 
 logger = logging.getLogger('gui')
 
-# 清理上次运行残留的临时文件
-TEMP_DIR = os.environ.get('TEMP', os.path.join(LOG_DIR, 'temp'))
-if os.path.isdir(TEMP_DIR):
-    for fname in os.listdir(TEMP_DIR):
-        fpath = os.path.join(TEMP_DIR, fname)
+# 清理上次运行残留的临时文件（仅清理应用专属临时子目录，避免误删系统 TEMP）
+APP_TEMP_DIR = os.path.join(LOG_DIR, 'temp')
+if os.path.isdir(APP_TEMP_DIR):
+    import shutil
+    for fname in os.listdir(APP_TEMP_DIR):
+        fpath = os.path.join(APP_TEMP_DIR, fname)
         try:
             if os.path.isfile(fpath):
                 os.remove(fpath)
             elif os.path.isdir(fpath):
-                import shutil
                 shutil.rmtree(fpath, ignore_errors=True)
         except Exception:
             pass

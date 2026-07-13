@@ -2,30 +2,29 @@ import os
 import cv2
 import queue
 import threading
-import multiprocessing
 import traceback
 import logging
 from pathlib import Path
+from datetime import datetime
 
-logger = logging.getLogger(__name__)
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QFrame, QTextEdit
 from PyQt6.QtCore import pyqtSlot, pyqtSignal, Qt, QTimer
 from PyQt6 import QtWidgets, QtGui
-from datetime import datetime
 from qfluentwidgets import (PushButton, CardWidget, TextEdit, FluentIcon, PrimaryPushButton, ToolButton)
+
 from ui.setting_interface import SettingInterface
 from ui.component.video_display_component import VideoDisplayComponent
 from ui.component.timeline_widget import TimelineWidget
-
 from ui.icon.my_fluent_icon import MyFluentIcon
-from infra.config import config, tr
-from ui.subtitle_remover_remote_call import SubtitleRemoverRemoteCall
 from ui.playback_controller import PlaybackController
 from app.pipeline import ProcessingPipeline
+from infra.config import config, tr
 from infra.process_manager import ProcessManager
 from infra.utils import get_readable_path
 from core.video_io.video_reader import create_video_capture
 from ui.preview_decoder import PreviewDecoder
+
+logger = logging.getLogger(__name__)
 
 
 class HomeInterface(QWidget):
@@ -345,13 +344,42 @@ class HomeInterface(QWidget):
         self._playback.toggle()
 
     def _playback_tick(self):
-        # Compare 模式仍用 seek 保持双轨同步
+        """播放定时器回调：顺序读取帧避免闪跳，播放结束后重置以允许重新播放。"""
         if self.current_mode == self.MODE_COMPARE:
-            v = self.video_slider.value() + 1
-            if v > self.video_slider.maximum():
+            # Compare 模式：顺序读取两个 cap（不再每帧 seek，避免闪跳）
+            ori_cap = self.video_cap
+            comp_cap = self.output_cap if (self._has_processed and self.output_cap and self.output_cap.isOpened()) else None
+            if ori_cap is None or not ori_cap.isOpened():
                 self._playback.stop()
                 return
-            self.video_slider.setValue(v)
+            ret_ori, ori_frame = ori_cap.read()
+            ret_comp, comp_frame = (False, None)
+            if comp_cap and comp_cap.isOpened():
+                ret_comp, comp_frame = comp_cap.read()
+            if not ret_ori:
+                # 播放结束：重置到开头以允许重新播放
+                self._playback.stop()
+                self.video_slider.setValue(1)
+                ori_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                if comp_cap:
+                    comp_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                return
+            fi = int(ori_cap.get(cv2.CAP_PROP_POS_FRAMES))
+            if ori_frame is not None:
+                self._last_ori_frame = ori_frame
+            if comp_frame is not None:
+                self._last_comp_frame = comp_frame
+            display_ori = self._last_ori_frame
+            display_comp = self._last_comp_frame if self._last_comp_frame is not None else display_ori
+            if display_ori is not None:
+                combined = self._concat_frames(display_ori, display_comp)
+                self.video_display_component.update_video_display(combined, draw_selection=False)
+            if self.fps and self.frame_count:
+                self._update_time_label(fi, self.fps, self.frame_count)
+            self.video_slider.blockSignals(True)
+            self.video_slider.setValue(fi)
+            self.video_slider.blockSignals(False)
+            self.timeline.set_current_frame(fi)
             return
         # Single 模式：顺序读取（不 seek），流畅播放
         cap = self.output_cap if (self._has_processed and self.output_cap and self.output_cap.isOpened()) else self.video_cap
@@ -360,7 +388,10 @@ class HomeInterface(QWidget):
             return
         ret, frame = cap.read()
         if not ret:
+            # 播放结束：重置到开头以允许重新播放
             self._playback.stop()
+            self.video_slider.setValue(1)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             return
         fi = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
         if self.fps and self.frame_count:
@@ -369,7 +400,7 @@ class HomeInterface(QWidget):
         self.video_slider.setValue(fi)
         self.video_slider.blockSignals(False)
         self.timeline.set_current_frame(fi)
-        self.update_preview(frame)
+        self.video_display_component.update_video_display(frame)
 
     def _set_playback_buttons_enabled(self, enabled):
         self._playback.set_buttons_enabled(enabled)
@@ -414,17 +445,11 @@ class HomeInterface(QWidget):
             if comp_frame is None and self._last_comp_frame is not None:
                 comp_frame = self._last_comp_frame
             if ori_frame is not None and comp_frame is not None:
-                if ori_frame.shape[0] != comp_frame.shape[0]:
-                    h = min(ori_frame.shape[0], comp_frame.shape[0])
-                    ori_frame = cv2.resize(ori_frame, (int(ori_frame.shape[1] * h / ori_frame.shape[0]), h))
-                    comp_frame = cv2.resize(comp_frame, (int(comp_frame.shape[1] * h / comp_frame.shape[0]), h))
-                combined = cv2.hconcat([ori_frame, comp_frame])
-                resized = self._img_resize(combined)
-                self.video_display_component.update_video_display(resized, draw_selection=False)
+                combined = self._concat_frames(ori_frame, comp_frame)
+                self.video_display_component.update_video_display(combined, draw_selection=False)
             elif ori_frame is not None:
                 # 无处理结果时只显示原片
-                resized = self._img_resize(ori_frame)
-                self.video_display_component.update_video_display(resized, draw_selection=False)
+                self.video_display_component.update_video_display(ori_frame, draw_selection=False)
             return
 
         cap = self.output_cap if (self._has_processed and self.output_cap and self.output_cap.isOpened()) else self.video_cap
@@ -443,17 +468,21 @@ class HomeInterface(QWidget):
             self.video_display_component.clear_display()
 
     def update_preview(self, frame):
-        resized_frame = self._img_resize(frame)
-        self.video_display_component.set_video_parameters(
-            self.frame_width, self.frame_height,
-            self.fps if self.fps is not None else 30,
-            self.display_mode,
-        )
-        self.video_display_component.update_video_display(resized_frame)
+        """更新预览画面（set_video_parameters 已在 load_video 时设置一次）。"""
+        self.video_display_component.update_video_display(frame)
 
-    def _img_resize(self, image):
-        # 不再做缩放，交由 update_video_display 一次性完成
-        return image
+    @staticmethod
+    def _concat_frames(frame_a, frame_b):
+        """将两帧等高拼接为对比图（高度不同时缩放到一致）。"""
+        if frame_a is None:
+            return frame_b
+        if frame_b is None:
+            return frame_a
+        if frame_a.shape[0] != frame_b.shape[0]:
+            h = min(frame_a.shape[0], frame_b.shape[0])
+            frame_a = cv2.resize(frame_a, (int(frame_a.shape[1] * h / frame_a.shape[0]), h))
+            frame_b = cv2.resize(frame_b, (int(frame_b.shape[1] * h / frame_b.shape[0]), h))
+        return cv2.hconcat([frame_a, frame_b])
 
     def load_video(self, video_path):
         logger.info('video_load_start: %s', video_path)
@@ -480,6 +509,13 @@ class HomeInterface(QWidget):
             logger.info('video_loaded: size=%dx%d, fps=%.2f, frames=%d',
                          self.frame_width, self.frame_height, self.fps, self.frame_count)
 
+        # 设置视频参数（帧宽高、fps、显示模式），供 VideoDisplayComponent 计算锁定比例等使用
+        self.video_display_component.set_video_parameters(
+            self.frame_width, self.frame_height,
+            self.fps if self.fps is not None else 30,
+            self.display_mode,
+        )
+
         self._stop_preview_decoder()
         self._preview_decoder = PreviewDecoder(
             get_readable_path(self.video_path), self._preview_queue)
@@ -490,21 +526,6 @@ class HomeInterface(QWidget):
         self._set_disp_buttons_enabled(False)
         self._set_playback_buttons_enabled(True)
 
-        self.update_preview(frame)
-        self.video_slider.setMaximum(self.frame_count)
-        self.video_slider.setValue(1)
-        self.video_display_component.set_dragger_enabled(True)
-        self._update_time_label(1, self.fps, self.frame_count)
-        self.timeline.set_data(self.video_display_component.get_tracks(), self.frame_count, self.fps)
-        self.timeline.set_current_frame(1)
-        return True
-        self.frame_height = frame.shape[0]
-        self.frame_width = frame.shape[1]
-        self.fps = 1
-        self.reset_processed_state()
-        self.current_mode = self.MODE_SINGLE
-        self._set_disp_buttons_enabled(False)
-        self._set_playback_buttons_enabled(True)
         self.update_preview(frame)
         self.video_slider.setMaximum(self.frame_count)
         self.video_slider.setValue(1)
@@ -561,8 +582,7 @@ class HomeInterface(QWidget):
         self.video_slider.blockSignals(True)
         self.video_slider.setValue(fi + 1)
         self.video_slider.blockSignals(False)
-        resized = self._img_resize(frame)
-        self.video_display_component.update_video_display(resized, draw_selection=True)
+        self.video_display_component.update_video_display(frame, draw_selection=True)
         if self.fps and self.frame_count:
             self._update_time_label(fi + 1, self.fps, self.frame_count)
 
@@ -666,14 +686,9 @@ class HomeInterface(QWidget):
             self._stop_event.set()
             self.append_output(tr['Main']['StopProcessing'])
             logger.info('user_stop_processing')
-            # Directly kill child process by PID
+            # 通过 ProcessManager 统一终止子进程
             if self._proc_pid is not None:
-                try:
-                    import subprocess
-                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(self._proc_pid)],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-                except Exception:
-                    pass
+                ProcessManager.instance().terminate_by_pid(self._proc_pid)
             ProcessManager.instance().terminate_all()
             if self._pipeline:
                 self._pipeline.stop()
@@ -839,16 +854,10 @@ class HomeInterface(QWidget):
         self.video_display_component.set_dragger_enabled(False)
         self._set_disp_buttons_enabled(True)
         if self.current_mode == self.MODE_SINGLE:
-            resized = self._img_resize(frame_comp)
-            self.video_display_component.update_video_display(resized, draw_selection=False)
+            self.video_display_component.update_video_display(frame_comp, draw_selection=False)
         elif self.current_mode == self.MODE_COMPARE:
-            if frame_ori.shape[0] != frame_comp.shape[0]:
-                h = min(frame_ori.shape[0], frame_comp.shape[0])
-                frame_ori = cv2.resize(frame_ori, (int(frame_ori.shape[1] * h / frame_ori.shape[0]), h))
-                frame_comp = cv2.resize(frame_comp, (int(frame_comp.shape[1] * h / frame_comp.shape[0]), h))
-            combined = cv2.hconcat([frame_ori, frame_comp])
-            resized = self._img_resize(combined)
-            self.video_display_component.update_video_display(resized, draw_selection=False)
+            combined = self._concat_frames(frame_ori, frame_comp)
+            self.video_display_component.update_video_display(combined, draw_selection=False)
         self.video_display_component.hide_status()
 
     @pyqtSlot(object)

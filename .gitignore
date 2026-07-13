@@ -22,4 +22,7 @@ Thumbs.db
 # Temp
 temp/
 
+# Windows launcher
+launcher.bat
+
 

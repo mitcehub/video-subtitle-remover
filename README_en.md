@@ -7,6 +7,12 @@
 
 Video-subtitle-remover (VSR) is an AI-based software that removes hardcoded subtitles from videos.
 It mainly implements the following functionalities:
+- 🎨 **Modern PyQt6 + qfluentwidgets UI** — Supports Windows 11 Mica effect and automatic system theme detection
+- 🖱️ **Visual subtitle area selection** — Drag and select subtitle regions directly on the video preview
+- ⏱️ **Timeline editing** — Track-based timeline for precise control over subtitle start/end ranges
+- 🔄 **Real-time original/result comparison** — Preview removal results during processing with comparison mode
+- 🎮 **Playback controls** — Frame-by-frame navigation, variable speed playback, keyboard shortcuts
+- ⚙️ **UI settings panel** — Adjust STTN parameters through the UI without manually editing config files
 - **Lossless resolution**: Removes hardcoded subtitles from videos and generates files without subtitles
 - Fills in the removed subtitle text area using a powerful AI algorithm model
 - Supports custom subtitle positions by only removing subtitles in the defined location
@@ -14,15 +20,6 @@ It mainly implements the following functionalities:
 - Supports multi-selection of images for batch removal of watermark text
 
 ![Screenshot](doc/Screenshot.png)
-
-## New Features
-
-- 🎨 **Modern PyQt6 + qfluentwidgets UI** — Rebuilt with PyQt6, supports Windows 11 Mica effect and automatic system theme detection
-- 🖱️ **Visual subtitle area selection** — Drag and select subtitle regions directly on the video preview
-- ⏱️ **Timeline editing** — Track-based timeline for precise control over subtitle start/end ranges
-- 🔄 **Real-time original/result comparison** — Preview removal results during processing with comparison mode
-- 🎮 **Playback controls** — Frame-by-frame navigation, variable speed playback, keyboard shortcuts
-- ⚙️ **UI settings panel** — Adjust STTN parameters through the UI without manually editing config files
 
 ## Source Code Usage Instructions
 

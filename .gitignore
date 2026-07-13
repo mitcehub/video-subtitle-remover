@@ -3,18 +3,13 @@ __pycache__/
 *.pyc
 .cache/
 
-# User config
-config/config.json
+
 
 # Logs
 *.log
 
 # Backup files
 *.bak
-
-# Large files (download separately)
-core/inpaint/models/sttn/sttn.pt
-core/video_io/ffmpeg/
 
 # OS
 Thumbs.db

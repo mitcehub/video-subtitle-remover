@@ -1,0 +1,2 @@
+core/inpaint/models/sttn/sttn.pt filter=lfs diff=lfs merge=lfs -text
+core/video_io/ffmpeg/** filter=lfs diff=lfs merge=lfs -text

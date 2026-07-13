@@ -1,0 +1,31 @@
+{
+    "Main": {
+        "CheckUpdateOnStartup": true,
+        "HardwareAcceleration": true,
+        "InpaintMode": "sttn-auto",
+        "SaveDirectory": "",
+        "SubtitleSelectionAreas": "0.88,0.99,0.15,0.85",
+        "UseBestRatioConstraint": true
+    },
+    "QFluentWidgets": {
+        "FontFamilies": [
+            "Segoe UI",
+            "Microsoft YaHei",
+            "PingFang SC"
+        ],
+        "ThemeColor": "#ff006fc4",
+        "ThemeMode": "Auto"
+    },
+    "Window": {
+        "Interface": "ch",
+        "Height": 900,
+        "Width": 1495,
+        "X": 231,
+        "Y": 94
+    },
+    "Sttn": {
+        "MaxLoadNum": 120,
+        "NeighborStride": 3,
+        "ReferenceLength": 5
+    }
+}

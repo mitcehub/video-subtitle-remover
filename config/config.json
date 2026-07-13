@@ -20,12 +20,12 @@
         "Interface": "ch",
         "Height": 900,
         "Width": 1495,
-        "X": 200,
-        "Y": 124
+        "X": 221,
+        "Y": 77
     },
     "Sttn": {
-        "MaxLoadNum": 50,
-        "NeighborStride": 5,
-        "ReferenceLength": 10
+        "MaxLoadNum": 120,
+        "NeighborStride": 3,
+        "ReferenceLength": 5
     }
 }

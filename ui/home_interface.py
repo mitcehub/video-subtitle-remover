@@ -22,6 +22,7 @@ from infra.config import config, tr
 from infra.process_manager import ProcessManager
 from infra.utils import get_readable_path
 from core.video_io.video_reader import create_video_capture
+from core.inpaint.mask import get_tight_inpaint_area
 from ui.preview_decoder import PreviewDecoder
 
 logger = logging.getLogger(__name__)
@@ -853,11 +854,91 @@ class HomeInterface(QWidget):
 
         self.video_display_component.set_dragger_enabled(False)
         self._set_disp_buttons_enabled(True)
-        if self.current_mode == self.MODE_SINGLE:
-            self.video_display_component.update_video_display(frame_comp, draw_selection=False)
+
+        # 处理中：在原始帧上叠加用户选择框 + 实际推理校准框
+        if self._worker_thread and self._worker_thread.is_alive() and self.current_mode == self.MODE_COMPARE:
+            tracks = self.video_display_component.get_tracks()
+            if tracks:
+                # 缩放到预览尺寸再画（帧从子进程来是全分辨率的，直接画在缩略图上线太细）
+                PREVIEW_W = 800
+                h_orig, w_orig = frame_ori.shape[:2]
+                scale = PREVIEW_W / w_orig if w_orig > PREVIEW_W else 1.0
+                if scale < 1.0:
+                    preview_h = int(h_orig * scale)
+                    ori_display = cv2.resize(frame_ori, (PREVIEW_W, preview_h), interpolation=cv2.INTER_AREA)
+                    comp_small = cv2.resize(frame_comp, (PREVIEW_W, preview_h), interpolation=cv2.INTER_AREA)
+                else:
+                    ori_display = frame_ori.copy()
+                    comp_small = frame_comp
+                h, w = ori_display.shape[:2]
+
+                # --- 收集像素坐标，分 track 累计 ---
+                track_pixel_groups = {}  # track_id -> list of (ymin,ymax,xmin,xmax)
+                enabled_tracks = []
+                for t in tracks:
+                    if not t.get("enabled", True):
+                        continue
+                    px = int(t["xmin"] * w)
+                    py = int(t["ymin"] * h)
+                    px2 = int(t["xmax"] * w)
+                    py2 = int(t["ymax"] * h)
+                    tid = t.get("id", 0)
+                    track_pixel_groups.setdefault(tid, []).append((py, py2, px, px2))
+                    enabled_tracks.append(t)
+
+                logger.debug("draw_boxes: %d tracks, frame=%dx%d (scaled from %dx%d, scale=%.2f)",
+                             len(track_pixel_groups), w, h, w_orig, h_orig, scale)
+
+                # --- 用轨道颜色画用户选区（角标）+ 推理校准框（完整矩形），同色 ---
+                # 固定画线参数（预览空间 ~800px 宽，不随视频缩放），确保在不同视频上大小一致
+                FIXED_CORNER = 48      # 角标长度（固定像素，不按视频缩放）
+                FIXED_PW = 2           # 线宽，与视频框选一致
+                FONT_SCALE = 1.1       # 标签字号
+                FONT_PW = 1            # 标签字粗细（FONT_HERSHEY_PLAIN 笔画细，设 2 会显粗）
+                for tid, coords in track_pixel_groups.items():
+                    t = next((t for t in enabled_tracks if str(t.get("id", "")) == str(tid)), None)
+                    color_hex = t.get("color", "#FF6B35") if t else "#FF6B35"
+                    bgr = (int(color_hex[5:7], 16), int(color_hex[3:5], 16), int(color_hex[1:3], 16))
+                    # 1) 用户原始选区 → 四角括号（不标文字）
+                    for (py, py2, px, px2) in coords:
+                        cv2.line(ori_display, (px, py), (px + FIXED_CORNER, py), bgr, FIXED_PW)
+                        cv2.line(ori_display, (px, py), (px, py + FIXED_CORNER), bgr, FIXED_PW)
+                        cv2.line(ori_display, (px2, py), (px2 - FIXED_CORNER, py), bgr, FIXED_PW)
+                        cv2.line(ori_display, (px2, py), (px2, py + FIXED_CORNER), bgr, FIXED_PW)
+                        cv2.line(ori_display, (px, py2), (px + FIXED_CORNER, py2), bgr, FIXED_PW)
+                        cv2.line(ori_display, (px, py2), (px, py2 - FIXED_CORNER), bgr, FIXED_PW)
+                        cv2.line(ori_display, (px2, py2), (px2 - FIXED_CORNER, py2), bgr, FIXED_PW)
+                        cv2.line(ori_display, (px2, py2), (px2, py2 - FIXED_CORNER), bgr, FIXED_PW)
+                    # 2) 推理校准框 → 完整矩形（标注轨道的唯一标签）
+                    try:
+                        scaled_padding = max(4, int(30 * scale))
+                        tight_areas = get_tight_inpaint_area(
+                            coords, w, h, padding=scaled_padding)
+                        for (ty1, ty2, tx1, tx2) in tight_areas:
+                            cv2.rectangle(ori_display, (tx1, ty1), (tx2, ty2), bgr, FIXED_PW)
+                            # 只在校准框上标一次 "轨道01"，去掉 ## 和 选/校
+                            try:
+                                label = f"轨道{int(tid):02d}"
+                            except (ValueError, TypeError):
+                                label = f"轨道{str(tid).zfill(2)}"
+                            cv2.putText(ori_display, label,
+                                        (tx1 + 4, ty1 - 10), cv2.FONT_HERSHEY_PLAIN,
+                                        FONT_SCALE * 1.8, bgr, FONT_PW)
+                    except Exception as e:
+                        logger.error("tight_crop_preview_error: %s", e)
+
+                combined = self._concat_frames(ori_display, comp_small)
+            else:
+                combined = self._concat_frames(frame_ori, frame_comp)
         elif self.current_mode == self.MODE_COMPARE:
             combined = self._concat_frames(frame_ori, frame_comp)
+        else:
+            combined = None
+
+        if combined is not None:
             self.video_display_component.update_video_display(combined, draw_selection=False)
+        else:
+            self.video_display_component.update_video_display(frame_comp, draw_selection=False)
         self.video_display_component.hide_status()
 
     @pyqtSlot(object)

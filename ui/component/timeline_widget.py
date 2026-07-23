@@ -74,7 +74,7 @@ else:
     def _uninstall_hook():
         pass
 
-TRACK_COLORS = ["#FF6B35", "#35A7FF", "#4BC0C0", "#FF6384", "#9966FF", "#FF9F40"]
+TRACK_COLORS = ["#2ECC71", "#FF6B35", "#35A7FF", "#4BC0C0", "#FF6384", "#9966FF", "#FF9F40", "#E74C3C", "#1ABC9C", "#9B59B6"]
 _SNAP_THRESHOLD = 6  # pixel radius for snapping
 
 

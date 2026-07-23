@@ -24,7 +24,7 @@ class VideoDisplayComponent(QWidget):
         # 初始化变量
         self.is_drawing = False
         self.current_draw_rect = (0, 0, 0, 0)  # 正在绘制的选区 (ymin, ymax, xmin, xmax)
-        self._track_id_counter = 0
+        self._track_id_counter = 1
         self.tracks = []  # 轨道列表：[{id, ymin,ymax,xmin,xmax, start,end, enabled,collapsed, color}, ...]
         self.active_track_index = -1
         self.drag_start_pos = None
@@ -75,7 +75,6 @@ class VideoDisplayComponent(QWidget):
         self.video_display = QtWidgets.QLabel()
         self.video_display.setStyleSheet("""
             background-color: black;
-            border-radius: 10px;
             border: 0px solid transparent;
         """)
         self.video_display.setMinimumWidth(200)
@@ -191,21 +190,6 @@ class VideoDisplayComponent(QWidget):
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        # 上圆角裁剪路径
-        path = QtGui.QPainterPath()
-        radius = 8
-        fx, fy = x_off, y_off
-        fw, fh = target_w, target_h
-        path.moveTo(fx + radius, fy)
-        path.lineTo(fx + fw - radius, fy)
-        path.arcTo(fx + fw - radius * 2, fy, radius * 2, radius * 2, 90, -90)
-        path.lineTo(fx + fw, fy + fh)
-        path.lineTo(fx, fy + fh)
-        path.lineTo(fx, fy + radius)
-        path.arcTo(fx, fy, radius * 2, radius * 2, 180, -90)
-        path.closeSubpath()
-
-        painter.setClipPath(path)
         painter.drawPixmap(x_off, y_off, pix)
         painter.end()
 
@@ -252,40 +236,6 @@ class VideoDisplayComponent(QWidget):
         for px, py in pts:
             painter.drawRect(px - hs, py - hs, hs * 2, hs * 2)
 
-    def _draw_ratio_indicator(self, painter, track, pixel_rect):
-        if self.frame_width is None or self.frame_height is None:
-            return
-        fw, fh = self.frame_width, self.frame_height
-        vw = (track["xmax"] - track["xmin"]) * fw
-        vh = (track["ymax"] - track["ymin"]) * fh
-        if vh <= 0 or vw <= 0:
-            return
-        ratio = vw / vh
-        STTN_TARGET = 640 / 120
-        err = abs(ratio - STTN_TARGET) / STTN_TARGET
-
-        tx = pixel_rect.left()
-        ty = pixel_rect.top() - 8
-
-        painter.setFont(QtGui.QFont("Arial", 10, QtGui.QFont.Weight.Bold))
-        if config.useBestRatioConstraint.value:
-            painter.setPen(QtGui.QPen(QtGui.QColor(0, 200, 83)))
-            r = QtCore.QRect(tx, ty - 20, 300, 24)
-            painter.drawText(r, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, f"比例：{STTN_TARGET:.1f}:1  锁定已开启")
-        else:
-            if err < 0.05:
-                color = QtGui.QColor(0, 200, 83)
-            elif err < 0.15:
-                color = QtGui.QColor(255, 193, 7)
-            elif err < 0.30:
-                color = QtGui.QColor(255, 152, 0)
-            else:
-                color = QtGui.QColor(244, 67, 54)
-            painter.setFont(QtGui.QFont("Arial", 10, QtGui.QFont.Weight.Bold))
-            painter.setPen(QtGui.QPen(color))
-            r = QtCore.QRect(tx, ty - 20, 400, 24)
-            painter.drawText(r, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, f"最佳: {STTN_TARGET:.1f}:1  当前: {ratio:.1f}:1  锁定已关闭")
-
     def update_preview_with_rect(self, rect=None, draw_selection=True):
         """更新带有选择框的预览"""
         if not hasattr(self, 'current_pixmap') or self.current_pixmap is None:
@@ -316,10 +266,10 @@ class VideoDisplayComponent(QWidget):
                 painter.drawRect(pixel_rect)
                 if i == self.active_track_index:
                     self._draw_handles(painter, pixel_rect, color)
-                    self._draw_ratio_indicator(painter, t, pixel_rect)
 
             if self.is_drawing and self.current_draw_rect and any(self.current_draw_rect):
-                pen = QtGui.QPen(QtGui.QColor(0, 255, 0))
+                draw_color = self._get_next_track_color()
+                pen = QtGui.QPen(QtGui.QColor(draw_color))
                 pen.setWidth(2)
                 painter.setPen(pen)
                 ymin, ymax, xmin, xmax = self.current_draw_rect
@@ -335,9 +285,6 @@ class VideoDisplayComponent(QWidget):
             return
         
         if event.button() == Qt.MouseButton.RightButton:
-            # STTN 模式固定启用比例锁定选项
-            self.action_lock_ratio.setVisible(True)
-            self.action_lock_ratio.setChecked(config.useBestRatioConstraint.value)
             global_pos = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
             self.context_menu.exec(global_pos)
             return
@@ -368,9 +315,6 @@ class VideoDisplayComponent(QWidget):
                 self.active_track_index = i
                 self.resize_edge = self.get_resize_edge(pos, px_rect)
                 self.drag_start_pos = (y_ratio, x_ratio)
-                if config.useBestRatioConstraint.value and self.resize_edge != "move" and self._get_target_ratio() is not None:
-                    self._snap_to_target_ratio(t)
-                    self.update_preview_with_rect()
                 return
             elif px_rect.contains(pos):
                 clicked_idx = i
@@ -445,89 +389,6 @@ class VideoDisplayComponent(QWidget):
             return "bottom"
         return None
 
-    def _get_target_ratio(self):
-        if self.frame_width is None or self.frame_height is None:
-            return None
-        return (640 / 120) * (self.frame_height / self.frame_width)
-
-    def _snap_to_target_ratio(self, t):
-        target = self._get_target_ratio()
-        if target is None:
-            return
-        cy = (t["ymin"] + t["ymax"]) / 2
-        cx = (t["xmin"] + t["xmax"]) / 2
-        w = t["xmax"] - t["xmin"]
-        h = t["ymax"] - t["ymin"]
-        if w <= 0 or h <= 0:
-            return
-        cur = w / h
-        if abs(cur - target) / target < 0.001:
-            return
-        if cur > target:
-            new_h = w / target
-            y1 = cy - new_h / 2
-            y2 = cy + new_h / 2
-            if y1 < 0:
-                y1, y2 = 0, new_h
-            elif y2 > 1:
-                y1, y2 = 1 - new_h, 1
-            if y1 >= 0 and y2 <= 1:
-                t["ymin"], t["ymax"] = y1, y2
-        else:
-            new_w = h * target
-            x1 = cx - new_w / 2
-            x2 = cx + new_w / 2
-            if x1 < 0:
-                x1, x2 = 0, new_w
-            elif x2 > 1:
-                x1, x2 = 1 - new_w, 1
-            if x1 >= 0 and x2 <= 1:
-                t["xmin"], t["xmax"] = x1, x2
-
-    def _apply_constrained_resize(self, t, edge, x_ratio, y_ratio):
-        target = self._get_target_ratio()
-        if target is None:
-            return False
-        cx = (t["xmin"] + t["xmax"]) / 2
-        cy = (t["ymin"] + t["ymax"]) / 2
-
-        if edge == "right":
-            xmax = max(cx + 0.005, x_ratio)
-            w = (xmax - cx) * 2
-            h = w / target
-        elif edge == "left":
-            xmin = min(cx - 0.005, x_ratio)
-            w = (cx - xmin) * 2
-            h = w / target
-        elif edge == "bottom":
-            ymax = max(cy + 0.005, y_ratio)
-            h = (ymax - cy) * 2
-            w = h * target
-        elif edge == "top":
-            ymin = min(cy - 0.005, y_ratio)
-            h = (cy - ymin) * 2
-            w = h * target
-        elif edge in ("bottomright", "topright", "bottomleft", "topleft"):
-            use_x = abs(x_ratio - cx) >= abs(y_ratio - cy)
-            if use_x:
-                w = abs(x_ratio - cx) * 2
-                h = w / target
-            else:
-                h = abs(y_ratio - cy) * 2
-                w = h * target
-        else:
-            return False
-
-        x1 = cx - w / 2
-        x2 = cx + w / 2
-        y1 = cy - h / 2
-        y2 = cy + h / 2
-        if x1 < 0 or x2 > 1 or y1 < 0 or y2 > 1:
-            return False
-        t["xmin"], t["xmax"] = x1, x2
-        t["ymin"], t["ymax"] = y1, y2
-        return True
-
     def selection_mouse_move(self, event):
         """鼠标移动事件处理"""
         if not self.enable_mouse_events:
@@ -537,29 +398,9 @@ class VideoDisplayComponent(QWidget):
         y_ratio, x_ratio = self._pos_to_norm(pos)
         
         if self.is_drawing:
-            target = self._get_target_ratio()
-            if config.useBestRatioConstraint.value and target is not None:
-                _, _, anchor_x, _ = self.current_draw_rect
-                anchor_y, _, _, _ = self.current_draw_rect
-                dw = x_ratio - anchor_x
-                dh = y_ratio - anchor_y
-                sx = 1 if dw >= 0 else -1
-                sy_ = 1 if dh >= 0 else -1
-                w = abs(dw)
-                h = abs(dh)
-                if h < 1e-6:
-                    h = w / target if w > 1e-6 else 0.01
-                elif w < 1e-6:
-                    w = h * target
-                elif w / h >= target:
-                    h = w / target
-                else:
-                    w = h * target
-                self.current_draw_rect = (anchor_y, anchor_y + sy_ * h, anchor_x, anchor_x + sx * w)
-            else:
-                _, _, sx, _ = self.current_draw_rect
-                sy, _, _, _ = self.current_draw_rect
-                self.current_draw_rect = (sy, y_ratio, sx, x_ratio)
+            _, _, sx, _ = self.current_draw_rect
+            sy, _, _, _ = self.current_draw_rect
+            self.current_draw_rect = (sy, y_ratio, sx, x_ratio)
             self.update_preview_with_rect()
         elif self.resize_edge and self.active_track_index >= 0:
             t = self.tracks[self.active_track_index]
@@ -573,8 +414,6 @@ class VideoDisplayComponent(QWidget):
                 t["ymin"], t["ymax"] = new_ymin, new_ymin + span_y
                 t["xmin"], t["xmax"] = new_xmin, new_xmin + span_x
                 self.drag_start_pos = (y_ratio, x_ratio)
-            elif config.useBestRatioConstraint.value and self._get_target_ratio() is not None:
-                self._apply_constrained_resize(t, self.resize_edge, x_ratio, y_ratio)
             else:
                 ymin, ymax, xmin, xmax = t["ymin"], t["ymax"], t["xmin"], t["xmax"]
                 if "left" in self.resize_edge:
@@ -608,13 +447,13 @@ class VideoDisplayComponent(QWidget):
             ph = (ymax - ymin) * sh
             if pw > 5 and ph > 5:
                 current_frame = self.video_slider.value()
-                colors = TRACK_COLORS
+                track_id = self._track_id_counter
                 track = {
-                    "id": self._track_id_counter,
+                    "id": track_id,
                     "ymin": ymin, "ymax": ymax, "xmin": xmin, "xmax": xmax,
                     "start": 1, "end": max(self.video_slider.maximum(), 1),
                     "enabled": True, "collapsed": False,
-                    "color": colors[self._track_id_counter % len(colors)],
+                    "color": self._get_track_color(track_id),
                 }
                 self._track_id_counter += 1
                 self.tracks.append(track)
@@ -705,6 +544,26 @@ class VideoDisplayComponent(QWidget):
         self._update_coord_mapper()
         return self._coord_mapper.preview_to_video(preview_selection_rects)
 
+    @staticmethod
+    def _get_track_color(track_id):
+        """根据轨道编号取颜色，第一条绿色，后续从调色板循环，超出的随机生成"""
+        idx = track_id - 1
+        if idx < len(TRACK_COLORS):
+            return TRACK_COLORS[idx]
+        # 调色板用完 → 随机生成明快颜色
+        import random
+        h = random.randint(0, 359)
+        s = random.randint(55, 100)
+        v = random.randint(70, 100)
+        h /= 360
+        import colorsys
+        r, g, b = colorsys.hsv_to_rgb(h, s / 100, v / 100)
+        return f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
+
+    def _get_next_track_color(self):
+        """新轨道在绘制中应使用的颜色（与最终轨道颜色同步）"""
+        return self._get_track_color(self._track_id_counter)
+
     def show_status(self, text):
         self.status_label.setText(text)
         self.status_label.show()
@@ -731,7 +590,7 @@ class VideoDisplayComponent(QWidget):
         """清除所有选区"""
         self.tracks = []
         self.active_track_index = -1
-        self._track_id_counter = 0
+        self._track_id_counter = 1
         self.update_preview_with_rect()
         self.tracks_changed.emit(self.tracks)
 
@@ -780,25 +639,10 @@ class VideoDisplayComponent(QWidget):
     def __init_context_menu(self):
         """初始化右键菜单"""
         self.context_menu = QMenu(self)
-        self.action_lock_ratio = QAction("锁定选框最佳比例", self)
-        self.action_lock_ratio.setCheckable(True)
-        self.action_lock_ratio.setChecked(config.useBestRatioConstraint.value)
-        self.action_lock_ratio.triggered.connect(self._on_lock_ratio_toggled)
-        self.context_menu.addAction(self.action_lock_ratio)
-
-        self.context_menu.addSeparator()
         self.action_delete_selection = QAction(tr['SubtitleExtractorGUI']['DeleteSelection'], self)
         self.action_delete_selection.setShortcut("DELETE")
         self.action_delete_selection.triggered.connect(self.__handle_delete_selection)
         self.context_menu.addAction(self.action_delete_selection)
-
-    def _on_lock_ratio_toggled(self, checked):
-        config.set(config.useBestRatioConstraint, checked)
-        self.action_lock_ratio.setChecked(checked)
-        if checked:
-            for t in self.tracks:
-                self._snap_to_target_ratio(t)
-        self.update_preview_with_rect()
 
     def closeEvent(self, event):
         """窗口关闭时断开信号连接"""

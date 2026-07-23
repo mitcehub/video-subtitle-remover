@@ -43,10 +43,14 @@ _ch.setFormatter(_fmt)
 _root_logger.addHandler(_ch)
 
 # 配置 scenedetect 日志（默认被静默清空，重定向到文件）
-_scenedetect_logger = logging.getLogger('pyscenedetect')
-_scenedetect_logger.setLevel(logging.DEBUG)
-_scenedetect_logger.handlers.clear()
-_scenedetect_logger.addHandler(_fh)
+try:
+    import pyscenedetect
+    _scenedetect_logger = logging.getLogger('pyscenedetect')
+    _scenedetect_logger.setLevel(logging.DEBUG)
+    _scenedetect_logger.handlers.clear()
+    _scenedetect_logger.addHandler(_fh)
+except ImportError:
+    pass
 
 logging.getLogger('PIL').setLevel(logging.WARNING)
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
@@ -85,12 +89,16 @@ class SubtitleExtractorGUI(FluentWindow):
         # 初始化系统主题监听器并连接信号
         self.themeListener = SystemThemeListener(self)
         self.themeListener.start()
- 
+
         # 设置窗口图标
         self.setWindowIcon(QtGui.QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "icon", "asr.ico")))
-        self.setWindowTitle("video subtitle remover")
-        # 默认窗口大小
-        self.resize(1400, 900)
+        # 窗口标题（自动同步到 titleLabel）
+        self.setWindowTitle("Video Subtitle Remover")
+        # 标题栏：紧凑高度 + logo 留边距
+        self.titleBar.setFixedHeight(36)
+        self.titleBar.hBoxLayout.setContentsMargins(12, 0, 0, 0)
+        # 内容区顶部随标题栏高度
+        self.widgetLayout.setContentsMargins(0, 36, 0, 0)
         # 创建界面布局
         self._create_layout()
         self._connectSignalToSlot()
@@ -117,7 +125,7 @@ class SubtitleExtractorGUI(FluentWindow):
         # 从旧的 widgetLayout 中移除 stackedWidget
         self.widgetLayout.removeWidget(self.stackedWidget)
 
-        # ============ 窗口级别左侧导航面板（始终可见） ============
+        # ============ 窗口级别左侧导航面板（仅图标按钮） ============
         left_panel = QWidget()
         left_panel.setMinimumWidth(48)
         left_panel.setMaximumWidth(48)
@@ -214,6 +222,12 @@ class SubtitleExtractorGUI(FluentWindow):
             self.close()
         else:
             super().keyPressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 导航栏已移除，标题栏贴到窗口最左侧
+        self.titleBar.move(0, 0)
+        self.titleBar.resize(self.width(), self.titleBar.height())
 
 
 if __name__ == '__main__':

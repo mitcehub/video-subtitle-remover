@@ -1,5 +1,5 @@
 """
-@desc: 高级设置页面
+@desc: 设置页面
 """
 
 from PyQt6 import QtWidgets, QtCore, QtGui
@@ -15,7 +15,7 @@ from infra.config import config, tr, VERSION
 PROJECT_URL = "https://github.com/mitcehub/video-subtitle-remover"
 
 class AdvancedSettingInterface(ScrollArea):
-    """高级设置页面"""
+    """设置页面（基础设置 + STTN + 关于）"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -42,30 +42,51 @@ class AdvancedSettingInterface(ScrollArea):
         self.setup_layout()
 
     def setup_layout(self):
+        self.basic_group.addSettingCard(self.interface_language)
+        self.basic_group.addSettingCard(self.save_directory)
+        self.expandLayout.addWidget(self.basic_group)
+
         self.sttn_group.addSettingCard(self.sttn_neighbor_stride)
         self.sttn_group.addSettingCard(self.sttn_reference_length)
         self.sttn_group.addSettingCard(self.sttn_max_load_num)
         self.expandLayout.addWidget(self.sttn_group)
 
-        self.advanced_group.addSettingCard(self.save_directory)
-        self.expandLayout.addWidget(self.advanced_group)
-
         self.about_group.addSettingCard(self.feedback)
         self.about_group.addSettingCard(self.copyright)
         self.about_group.addSettingCard(self.project_link)
-        
         self.expandLayout.addWidget(self.about_group)
+
         self.expandLayout.setSpacing(16)
         self.expandLayout.setContentsMargins(16, 16, 16, 48)
         
     def setup_ui(self):
         """设置UI"""
+        # 基础设置组（置顶）
+        self.basic_group = SettingCardGroup(tr["Setting"]["AdvancedSetting"], self.scrollWidget)
         # STTN设置组
         self.sttn_group = SettingCardGroup(tr["Setting"]["SttnSetting"], self.scrollWidget)
-        # 高级设置组
-        self.advanced_group = SettingCardGroup(tr["Setting"]["AdvancedSetting"], self.scrollWidget)
         # 关于设置组
         self.about_group = SettingCardGroup(tr["Setting"]["AboutSetting"], self.scrollWidget)
+
+        # 语言选择
+        self.interface_language = ComboBoxSettingCard(
+            configItem=config.interface,
+            icon=FluentIcon.LANGUAGE,
+            title=tr["SubtitleExtractorGUI"]["InterfaceLanguage"],
+            content="",
+            parent=self.basic_group,
+            texts=config.interfaceTexts.keys(),
+        )
+
+        # 视频保存路径
+        self.save_directory = PushSettingCard(
+            text=tr["Setting"]["ChooseDirectory"],
+            icon=FluentIcon.DOWNLOAD,
+            title=tr["Setting"]["SaveDirectory"],
+            content=tr["Setting"]["SaveDirectoryDefault"] if not config.saveDirectory.value else config.saveDirectory.value,
+            parent=self.basic_group
+        )
+        self.save_directory.clicked.connect(self.choose_save_directory)
 
         # STTN设置组
         self.sttn_neighbor_stride = RangeSettingCard(
@@ -91,16 +112,6 @@ class AdvancedSettingInterface(ScrollArea):
             content=tr["Setting"]["SttnMaxLoadNumDesc"],
             parent=self.sttn_group
         )
-
-        # 视频保存路径
-        self.save_directory = PushSettingCard(
-            text=tr["Setting"]["ChooseDirectory"],
-            icon=FluentIcon.DOWNLOAD,
-            title=tr["Setting"]["SaveDirectory"],
-            content=tr["Setting"]["SaveDirectoryDefault"] if not config.saveDirectory.value else config.saveDirectory.value,
-            parent=self.advanced_group
-        )
-        self.save_directory.clicked.connect(self.choose_save_directory)
 
         # 添加反馈链接
         self.feedback = PrimaryPushSettingCard(

@@ -22,6 +22,9 @@ Thumbs.db
 # Temp
 temp/
 
+# Code intelligence cache
+.codegraph/
+
 # Windows launcher
 launcher.bat
 

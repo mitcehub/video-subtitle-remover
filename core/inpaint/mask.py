@@ -33,18 +33,68 @@ def create_mask(size, coords_list):
     return mask
 
 
-# 紧凑裁剪参数（参考 sttn-auto get_crop_region）
+# 紧凑裁剪参数（参考 sttn-auto inference get_crop_region + training _expand_to_ratio）
 TIGHT_PADDING = 30       # bbox 四周扩展像素数
 TIGHT_MIN_ASPECT = 3.0   # 最小宽高比（防止窄框导致极端变形）
 TIGHT_ALIGN = 8          # 对齐倍数（兼容 encoder 4x 下采样 + patchsize）
+TARGET_CROP_RATIO = 640.0 / 120.0  # 模型输入宽高比 5.333，resize 到 640×120 时不变形
+
+
+def _expand_to_target_ratio(x1, y1, x2, y2, W, H, target_ratio):
+    """将 crop 框扩展到目标宽高比（只加不减，超出边界贴边）。
+
+    以当前框中心为基准：宽度不够则横向扩，高度不够则纵向扩。
+    使 resize 到 640×120 时文字基本不变形。
+    """
+    cur_w = x2 - x1
+    cur_h = y2 - y1
+    cur_ratio = cur_w / max(cur_h, 1)
+
+    if cur_ratio < target_ratio:
+        # 太窄 → 横向扩宽
+        new_w = int(cur_h * target_ratio)
+        new_h = cur_h
+    else:
+        # 太扁 → 纵向加高
+        new_w = cur_w
+        new_h = int(cur_w / target_ratio)
+
+    new_w = max(new_w, cur_w)
+    new_h = max(new_h, cur_h)
+
+    cx = (x1 + x2) / 2
+    cy = (y1 + y2) / 2
+
+    nx1 = int(cx - new_w / 2)
+    nx2 = int(cx + new_w / 2)
+    ny1 = int(cy - new_h / 2)
+    ny2 = int(cy + new_h / 2)
+
+    # 超出边界则向对侧补偿
+    if nx1 < 0:
+        nx2 -= nx1
+        nx1 = 0
+    if nx2 > W:
+        nx1 -= (nx2 - W)
+        nx2 = W
+    if ny1 < 0:
+        ny2 -= ny1
+        ny1 = 0
+    if ny2 > H:
+        ny1 -= (ny2 - H)
+        ny2 = H
+
+    return max(0, nx1), max(0, ny1), min(W, nx2), min(H, ny2)
 
 
 def get_tight_inpaint_area(coords_list, W, H, padding=TIGHT_PADDING,
-                            min_aspect=TIGHT_MIN_ASPECT, align=TIGHT_ALIGN):
-    """围绕用户选择框计算紧凑裁剪区域（参考 sttn-auto get_crop_region）。
+                            min_aspect=TIGHT_MIN_ASPECT, align=TIGHT_ALIGN,
+                            target_ratio=TARGET_CROP_RATIO):
+    """围绕用户选择框计算紧凑裁剪区域（参考 sttn-auto get_crop_region + _expand_to_ratio）。
 
     与全宽条带策略不同，此函数保留用户选择的 xmin/xmax 信息，
     生成紧凑的 (ymin, ymax, xmin, xmax) 裁剪区域。
+    最后一步会按 target_ratio 扩展，确保 resize 到 640×120 时文字基本不变形。
 
     Args:
         coords_list: 坐标列表 [(ymin, ymax, xmin, xmax), ...]
@@ -53,6 +103,7 @@ def get_tight_inpaint_area(coords_list, W, H, padding=TIGHT_PADDING,
         padding: 选择框四周扩展像素数，默认 30
         min_aspect: 最小宽高比，默认 3.0
         align: 尺寸对齐倍数，默认 8
+        target_ratio: 目标宽高比，默认 640/120=5.333
 
     Returns:
         紧凑裁剪区域列表 [(ymin, ymax, xmin, xmax), ...]
@@ -81,7 +132,10 @@ def get_tight_inpaint_area(coords_list, W, H, padding=TIGHT_PADDING,
                 x1_new = max(0, x2_new - target_w)
             x1, x2 = x1_new, x2_new
 
-        # 3. 高度对齐（两侧均匀收缩，避免整体偏移）
+        # 3. 标准化到目标宽高比（只加不减，resize 到 640×120 时不变形）
+        x1, y1, x2, y2 = _expand_to_target_ratio(x1, y1, x2, y2, W, H, target_ratio)
+
+        # 4. 高度对齐（两侧均匀收缩，避免整体偏移）
         crop_h = y2 - y1
         remainder = crop_h % align
         if remainder != 0:
@@ -89,7 +143,7 @@ def get_tight_inpaint_area(coords_list, W, H, padding=TIGHT_PADDING,
             y1 = min(H - align, y1 + half)
             y2 = max(y1 + align, y2 - (remainder - half))
 
-        # 4. 宽度对齐（两侧均匀收缩）
+        # 5. 宽度对齐（两侧均匀收缩）
         crop_w = x2 - x1
         remainder_w = crop_w % align
         if remainder_w != 0:
@@ -97,7 +151,7 @@ def get_tight_inpaint_area(coords_list, W, H, padding=TIGHT_PADDING,
             x1 = min(W - align, x1 + half)
             x2 = max(x1 + align, x2 - (remainder_w - half))
 
-        # 5. 最终边界检查
+        # 6. 最终边界检查
         y1 = max(0, min(y1, H - 1))
         y2 = max(y1 + align, min(y2, H))
         x1 = max(0, min(x1, W - 1))
@@ -105,8 +159,9 @@ def get_tight_inpaint_area(coords_list, W, H, padding=TIGHT_PADDING,
 
         areas.append((y1, y2, x1, x2))
 
-    logger.info('get_tight_inpaint_area: input=%d boxes, output=%d areas, padding=%d, min_aspect=%.1f',
-                len(coords_list), len(areas), padding, min_aspect)
+    logger.info('get_tight_inpaint_area: input=%d boxes, output=%d areas, '
+                'padding=%d, min_aspect=%.1f, target_ratio=%.3f',
+                len(coords_list), len(areas), padding, min_aspect, target_ratio)
     return areas
 
 

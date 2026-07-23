@@ -183,8 +183,36 @@ class STTNInpaint:
     def __init__(self, device, model_path):
         self.device = device
         self.model = SubtitleRemovalGenerator().to(device)
+
+        # 记录模型文件的路径、大小和 SHA-256 前缀（前后各 1MB，避免完整读取 67MB）
+        import hashlib
+        _mp = model_path
+        _size = os.path.getsize(_mp) if os.path.isfile(_mp) else -1
+        _sha_prefix = ''
+        try:
+            with open(_mp, 'rb') as _fh:
+                _head = _fh.read(1 << 20)       # 前 1MB
+                _fh.seek(-(1 << 20), 2)          # 后 1MB
+                _tail = _fh.read(1 << 20)
+            _sha_prefix = hashlib.sha256(_head + _tail).hexdigest()[:16]
+        except Exception:
+            pass
+        logger.info('sttn_model_file: path=%s, size=%d, sha256=%s', _mp, _size, _sha_prefix)
+
         ckpt = torch.load(model_path, map_location='cpu', weights_only=True)
-        self.model.load_state_dict(ckpt.get('netG', ckpt), strict=False)
+        state_dict = ckpt.get('netG', ckpt)
+        missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            logger.error('sttn_model_weight_mismatch: missing=%d, unexpected=%d',
+                         len(missing), len(unexpected))
+            for k in missing:
+                logger.error('  missing: %s', k)
+            for k in unexpected:
+                logger.error('  unexpected: %s', k)
+            raise RuntimeError(
+                f'STTN 模型权重不匹配：缺少 {len(missing)} 个参数、多出 {len(unexpected)} 个参数。'
+                '请确认 core/inpaint/models/sttn/sttn.pt 是正确版本。'
+            )
         self.model.eval()
         self.neighbor_stride = config.sttnNeighborStride.value
         self.ref_length = config.sttnReferenceLength.value
@@ -352,14 +380,8 @@ class STTNAutoInpaint:
                 _, global_mask = cv2.threshold(input_mask, 127, 1, cv2.THRESH_BINARY)
                 global_mask = global_mask[:, :, None]
 
-            # 如果 sub_areas 有原始坐标，优先使用紧凑裁剪（保留用户框选的 xmin/xmax）
-            use_tight = bool(sub_areas)
-            if use_tight:
-                global_area = get_tight_inpaint_area(sub_areas, frame_info['W'], frame_info['H'])
-                logger.info('sttn_auto: using tight crop from sub_areas, %d areas', len(global_area))
-            else:
-                global_area = get_inpaint_area_by_mask(frame_info['W'], frame_info['H'], split_h, global_mask)
-                logger.info('sttn_auto: using full-width crop from mask, %d areas', len(global_area))
+            global_area = get_inpaint_area_by_mask(frame_info['W'], frame_info['H'], split_h, global_mask)
+            logger.info('sttn_auto: using full-width crop from mask, %d areas', len(global_area))
 
             effective_gap = self.clip_gap
             vram = HardwareAccelerator.instance().get_available_vram_mb()
@@ -381,22 +403,15 @@ class STTNAutoInpaint:
 
                 chunk_mask = global_mask
                 chunk_area = global_area
-                chunk_tight = use_tight
+                chunk_tight = False
                 if track_data:
                     areas = [(t["ymin"], t["ymax"], t["xmin"], t["xmax"])
-                             for t in track_data if t["start"] <= end_f and t["end"] >= start_f + 1]
+                             for t in track_data if t.get("enabled", True) and t["start"] <= end_f and t["end"] >= start_f + 1]
                     if areas:
-                        if use_tight:
-                            # track_data 有原始坐标时用紧凑裁剪
-                            chunk_area = get_tight_inpaint_area(areas, frame_info['W'], frame_info['H'])
-                        else:
-                            m = create_mask((frame_info['H'], frame_info['W']), areas)
-                            _, m = cv2.threshold(m, 127, 1, cv2.THRESH_BINARY)
-                            chunk_mask = m[:, :, None]
-                            chunk_area = get_inpaint_area_by_mask(frame_info['W'], frame_info['H'], split_h, chunk_mask)
+                        chunk_area = get_tight_inpaint_area(areas, frame_info['W'], frame_info['H'])
+                        chunk_tight = True
                     else:
                         chunk_area = []
-                        chunk_tight = False
 
                 frames_hr, frames, comps = [], {}, {k: [] for k in range(len(chunk_area))}
                 valid_count = 0
@@ -436,7 +451,24 @@ class STTNAutoInpaint:
                     for j in range(valid_count):
                         original = frames_hr[j].copy() if gui_mode else None
                         frame = frames_hr[j]
-                        if j in processed_map:
+
+                        # P3: 按帧计算有效轨道 mask，避免 chunk 边界帧被多余处理
+                        do_composite = j in processed_map
+                        per_frame_mask = None
+                        if do_composite and track_data:
+                            frame_number = start_f + j
+                            frame_tracks = [t for t in track_data if t.get("enabled", True)
+                                            and t["start"] <= frame_number + 1 <= t["end"]]
+                            if frame_tracks:
+                                frame_areas = [(t["ymin"], t["ymax"], t["xmin"], t["xmax"])
+                                               for t in frame_tracks]
+                                _fm = create_mask((frame_info['H'], frame_info['W']), frame_areas)
+                                _, _fm = cv2.threshold(_fm, 127, 1, cv2.THRESH_BINARY)
+                                per_frame_mask = _fm[:, :, None]
+                            else:
+                                do_composite = False  # 无轨道覆盖该帧 → 不合成
+
+                        if do_composite:
                             ci = processed_map[j]
                             for k in range(len(chunk_area)):
                                 if ci < len(comps[k]):
@@ -446,12 +478,16 @@ class STTNAutoInpaint:
                                         area_w = a[3] - a[2]
                                         comp = cv2.resize(comps[k][ci], (area_w, area_h))
                                         comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
-                                        m = chunk_mask[a[0]:a[1], a[2]:a[3], :]
+                                        m = (per_frame_mask[a[0]:a[1], a[2]:a[3], :]
+                                             if per_frame_mask is not None
+                                             else chunk_mask[a[0]:a[1], a[2]:a[3], :])
                                         frame[a[0]:a[1], a[2]:a[3], :] = m * comp + (1 - m) * frame[a[0]:a[1], a[2]:a[3], :]
                                     else:
                                         comp = cv2.resize(comps[k][ci], (frame_info['W'], area_h))
                                         comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
-                                        m = chunk_mask[a[0]:a[1], :]
+                                        m = (per_frame_mask[a[0]:a[1], :]
+                                             if per_frame_mask is not None
+                                             else chunk_mask[a[0]:a[1], :])
                                         frame[a[0]:a[1], :, :] = m * comp + (1 - m) * frame[a[0]:a[1], :, :]
                         writer.write(frame)
                         total_written += 1

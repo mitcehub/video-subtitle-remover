@@ -15,12 +15,17 @@ logger = logging.getLogger(__name__)
 VERSION = "1.5"
 BASE_DIR = str(Path(os.path.abspath(__file__)).parent.parent)
 _STTN_DIR = os.path.join(BASE_DIR, 'core', 'inpaint', 'models', 'sttn')
-_MODEL_EXTS = ('.pt', '.pth', '.ckpt', '.bin')
-MODEL_PATH = next(
-    (os.path.join(_STTN_DIR, f) for f in os.listdir(_STTN_DIR)
-     if os.path.splitext(f)[1].lower() in _MODEL_EXTS and not f.endswith('.bak')),
-    os.path.join(_STTN_DIR, 'sttn.pt')
-)
+_MODEL_PATH_FIXED = os.path.join(_STTN_DIR, 'sttn.pt')
+if os.path.isfile(_MODEL_PATH_FIXED):
+    MODEL_PATH = _MODEL_PATH_FIXED
+else:
+    _MODEL_EXTS = ('.pt', '.pth', '.ckpt', '.bin')
+    MODEL_PATH = next(
+        (os.path.join(_STTN_DIR, f) for f in os.listdir(_STTN_DIR)
+         if os.path.splitext(f)[1].lower() in _MODEL_EXTS and not f.endswith('.bak')),
+        _MODEL_PATH_FIXED  # fallback — will fail with clear error at load time
+    )
+    logger.warning('sttn_model_path_fallback: sttn.pt not found, using %s', MODEL_PATH)
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 

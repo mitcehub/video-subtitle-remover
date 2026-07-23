@@ -16,14 +16,14 @@ from tqdm import tqdm
 
 from infra.config import config
 from infra.utils import is_frame_in_sections
-from core.inpaint.mask import get_inpaint_area_by_mask, create_mask
+from core.inpaint.mask import get_inpaint_area_by_mask, get_tight_inpaint_area, create_mask
 from core.video_io.video_reader import FramePrefetcher, create_video_capture
 from infra.hardware import HardwareAccelerator
 
 logger = logging.getLogger(__name__)
 
 # STTN 模型输入尺寸
-MODEL_W = 648
+MODEL_W = 640
 MODEL_H = 120
 # split_h 计算系数：split_h = int(W * SPLIT_H_RATIO / SPLIT_H_DIVISOR)
 SPLIT_H_NUMERATOR = 3
@@ -50,9 +50,10 @@ def _init_weights(module, gain=0.02):
 
 
 class Attention(nn.Module):
-    def forward(self, query, key, value, m):
+    def forward(self, query, key, value, m=None):
         scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(query.size(-1))
-        scores.masked_fill(m, torch.finfo(scores.dtype).min)
+        if m is not None:
+            scores.masked_fill(m, torch.finfo(scores.dtype).min)
         p_attn = F.softmax(scores, dim=-1)
         return torch.matmul(p_attn, value), p_attn
 
@@ -69,7 +70,7 @@ class MultiHeadedAttention(nn.Module):
             nn.LeakyReLU(0.2, inplace=True))
         self.attention = Attention()
 
-    def forward(self, x, m, b, c):
+    def forward(self, x, m=None, b=1, c=256):
         bt, _, h, w = x.size()
         t = bt // b
         d_k = c // len(self.patch_size)
@@ -78,13 +79,16 @@ class MultiHeadedAttention(nn.Module):
         _key = self.key_embedding(x)
         _value = self.value_embedding(x)
         for (width, height), query, key, value in zip(self.patch_size,
-                                                      torch.chunk(_query, len(self.patch_size), dim=1),
-                                                      torch.chunk(_key, len(self.patch_size), dim=1),
-                                                      torch.chunk(_value, len(self.patch_size), dim=1)):
+                                                       torch.chunk(_query, len(self.patch_size), dim=1),
+                                                       torch.chunk(_key, len(self.patch_size), dim=1),
+                                                       torch.chunk(_value, len(self.patch_size), dim=1)):
             out_w, out_h = w // width, h // height
-            mm = m.view(b, t, 1, out_h, height, out_w, width)
-            mm = mm.permute(0, 1, 3, 5, 2, 4, 6).contiguous().view(b, t * out_h * out_w, height * width)
-            mm = (mm.mean(-1) > 0.5 + 1e-7).unsqueeze(1).expand(-1, t * out_h * out_w, -1)
+            if m is not None:
+                mm = m.view(b, t, 1, out_h, height, out_w, width)
+                mm = mm.permute(0, 1, 3, 5, 2, 4, 6).contiguous().view(b, t * out_h * out_w, height * width)
+                mm = (mm.mean(-1) > 0.5 + 1e-7).unsqueeze(1).expand(-1, t * out_h * out_w, -1)
+            else:
+                mm = None
             query = query.view(b, t, d_k, out_h, height, out_w, width).permute(0, 1, 3, 5, 2, 4, 6).contiguous().view(b, t * out_h * out_w, d_k * height * width)
             key = key.view(b, t, d_k, out_h, height, out_w, width).permute(0, 1, 3, 5, 2, 4, 6).contiguous().view(b, t * out_h * out_w, d_k * height * width)
             value = value.view(b, t, d_k, out_h, height, out_w, width).permute(0, 1, 3, 5, 2, 4, 6).contiguous().view(b, t * out_h * out_w, d_k * height * width)
@@ -114,10 +118,11 @@ class TransformerBlock(nn.Module):
         self.feed_forward = FeedForward(hidden)
 
     def forward(self, x):
-        x, m, b, c = x['x'], x['m'], x['b'], x['c']
-        x = x + self.attention(x, m, b, c)
-        x = x + self.feed_forward(x)
-        return {'x': x, 'm': m, 'b': b, 'c': c}
+        x_val, b, c = x['x'], x['b'], x['c']
+        m = x.get('m')
+        x_val = x_val + self.attention(x_val, m, b, c)
+        x_val = x_val + self.feed_forward(x_val)
+        return {'x': x_val, 'm': m, 'b': b, 'c': c}
 
 
 class Deconv(nn.Module):
@@ -152,7 +157,7 @@ class SubtitleRemovalGenerator(nn.Module):
     def __init__(self):
         super().__init__()
         channel = 256
-        patch_size = [(162, 30), (54, 10), (18, 6), (6, 3)]
+        patch_size = [(80, 15), (32, 6), (10, 5), (5, 3)]
         self.transformer = nn.Sequential(*[TransformerBlock(patch_size, hidden=channel) for _ in range(8)])
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 64, 3, 2, 1), nn.LeakyReLU(0.2, True),
@@ -186,19 +191,39 @@ class STTNInpaint:
         logger.info('sttn_model_loaded: device=%s, neighbor_stride=%d, ref_length=%d',
                  device, self.neighbor_stride, self.ref_length)
 
-    def __call__(self, input_frames: List[np.ndarray], input_mask: np.ndarray):
+    def __call__(self, input_frames: List[np.ndarray], input_mask: np.ndarray,
+                 tight_areas: List[tuple] | None = None):
+        """执行 STTN 推理。
+
+        Args:
+            input_frames: 原始帧列表 (BGR)
+            input_mask: 二值遮罩
+            tight_areas: 可选紧凑裁剪区域列表 [(ymin, ymax, xmin, xmax)]。
+                         提供时使用 tight crop 替代全宽 crop。
+        """
         _, mask = cv2.threshold(input_mask, 127, 1, cv2.THRESH_BINARY)
         mask = mask[:, :, None]
         H, W = mask.shape[:2]
-        split_h = int(W * SPLIT_H_NUMERATOR / SPLIT_H_DENOMINATOR)
-        inpaint_area = get_inpaint_area_by_mask(W, H, split_h, mask)
+
+        if tight_areas:
+            inpaint_area = tight_areas
+            use_tight = True
+            logger.info('sttn_inpaint: using tight crop, %d areas', len(tight_areas))
+        else:
+            split_h = int(W * SPLIT_H_NUMERATOR / SPLIT_H_DENOMINATOR)
+            inpaint_area = get_inpaint_area_by_mask(W, H, split_h, mask)
+            use_tight = False
+
         frames_hr = [f.copy() for f in input_frames]
         frames_scaled = {}
         comps = {}
 
         for j, image in enumerate(frames_hr):
             for k, area in enumerate(inpaint_area):
-                crop = image[area[0]:area[1], :, :]
+                if use_tight:
+                    crop = image[area[0]:area[1], area[2]:area[3], :]
+                else:
+                    crop = image[area[0]:area[1], :, :]
                 frames_scaled.setdefault(k, []).append(cv2.resize(crop, (MODEL_W, MODEL_H)))
 
         for k in frames_scaled:
@@ -211,10 +236,17 @@ class STTNInpaint:
         for j, frame in enumerate(frames_hr):
             for k, area in enumerate(inpaint_area):
                 area_h = area[1] - area[0]
-                comp = cv2.resize(comps[k][j], (W, area_h))
-                comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
-                m = mask[area[0]:area[1], :]
-                frame[area[0]:area[1], :, :] = m * comp + (1 - m) * frame[area[0]:area[1], :, :]
+                if use_tight:
+                    area_w = area[3] - area[2]
+                    comp = cv2.resize(comps[k][j], (area_w, area_h))
+                    comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
+                    m = mask[area[0]:area[1], area[2]:area[3], :]
+                    frame[area[0]:area[1], area[2]:area[3], :] = m * comp + (1 - m) * frame[area[0]:area[1], area[2]:area[3], :]
+                else:
+                    comp = cv2.resize(comps[k][j], (W, area_h))
+                    comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
+                    m = mask[area[0]:area[1], :]
+                    frame[area[0]:area[1], :, :] = m * comp + (1 - m) * frame[area[0]:area[1], :, :]
             result.append(frame)
         return result
 
@@ -231,11 +263,10 @@ class STTNInpaint:
 
         with torch.no_grad():
             frames_flat = chunk_t.view(-1, 3, MODEL_H, MODEL_W)
-            enc_first = self.model.encoder(frames_flat)
-            prior_logits = self.model.prior_head(enc_first, rgb=frames_flat)
-            prior_bin = (torch.sigmoid(prior_logits) > 0.5).float()
-            masked = frames_flat * (1 - prior_bin) - prior_bin
-            enc_feat = self.model.encoder(masked)
+
+            # 新模型：单次编码（不再 masking input 后二次编码）
+            enc_feat = self.model.encoder(frames_flat)
+            prior_logits = self.model.prior_head(enc_feat, rgb=frames_flat)
             _, c_feat, h_feat, w_feat = enc_feat.shape
 
             for f in range(0, frame_length, self.neighbor_stride):
@@ -244,15 +275,15 @@ class STTNInpaint:
                 all_ids = neighbor_ids + self._get_ref_index(neighbor_ids, frame_length)
 
                 feat_win = enc_feat[all_ids]
-                mask_win = F.interpolate(prior_bin[all_ids], size=(h_feat, w_feat), mode='nearest')
-                feat_win = self.model.transformer({'x': feat_win, 'm': mask_win, 'b': 1, 'c': c_feat})['x']
+                # 新模型：transformer 无 attention mask
+                feat_win = self.model.transformer({'x': feat_win, 'b': 1, 'c': c_feat})['x']
                 output = torch.tanh(self.model.decoder(feat_win))
 
                 prior_np = torch.sigmoid(prior_logits[all_ids])[:, 0].cpu().numpy()
                 for i in range(l_t):
                     idx = neighbor_ids[i]
                     np_out = output[i].cpu().permute(1, 2, 0).numpy() * 0.5 + 0.5
-                    np_prior = (prior_np[i] > 0.5).astype(np.float32)[..., None]
+                    np_prior = (prior_np[i] > 0.7).astype(np.float32)[..., None]
                     blended = np_prior * np_out + (1 - np_prior) * rgb_frames[idx]
                     blended = blended.clip(0, 1).astype(np.float32)
                     if comp_frames[idx] is None:
@@ -277,7 +308,13 @@ class STTNAutoInpaint:
             os.path.dirname(os.path.abspath(video_path)),
             f"{os.path.basename(video_path).rsplit('.', 1)[0]}_no_sub.mp4"
         )
-        self.clip_gap = clip_gap or config.get_sttn_max_load_num()
+        raw_max_load = config.sttnMaxLoadNum.value
+        min_chunk = config.sttnNeighborStride.value * config.sttnReferenceLength.value
+        self.clip_gap = max(raw_max_load, min_chunk)
+        if self.clip_gap > raw_max_load:
+            logger.info('sttn_max_load_num: user=%d raised to %d (min_chunk=neighbor_stride*ref_length=%d*%d=%d)',
+                        raw_max_load, self.clip_gap,
+                        config.sttnNeighborStride.value, config.sttnReferenceLength.value, min_chunk)
 
     def __call__(self, input_mask=None, input_sub_remover=None, tbar=None, gui_mode=False):
         reader = None
@@ -315,13 +352,24 @@ class STTNAutoInpaint:
                 _, global_mask = cv2.threshold(input_mask, 127, 1, cv2.THRESH_BINARY)
                 global_mask = global_mask[:, :, None]
 
-            global_area = get_inpaint_area_by_mask(frame_info['W'], frame_info['H'], split_h, global_mask)
+            # 如果 sub_areas 有原始坐标，优先使用紧凑裁剪（保留用户框选的 xmin/xmax）
+            use_tight = bool(sub_areas)
+            if use_tight:
+                global_area = get_tight_inpaint_area(sub_areas, frame_info['W'], frame_info['H'])
+                logger.info('sttn_auto: using tight crop from sub_areas, %d areas', len(global_area))
+            else:
+                global_area = get_inpaint_area_by_mask(frame_info['W'], frame_info['H'], split_h, global_mask)
+                logger.info('sttn_auto: using full-width crop from mask, %d areas', len(global_area))
 
             effective_gap = self.clip_gap
             vram = HardwareAccelerator.instance().get_available_vram_mb()
             if vram > 0 and frame_info['W'] > 0 and frame_info['H'] > 0:
                 max_frames = max(int(vram * 1024 * 1024 / (frame_info['W'] * frame_info['H'] * 12)), 10)
-                effective_gap = min(effective_gap, max_frames)
+                capped = min(effective_gap, max_frames)
+                if capped < effective_gap:
+                    logger.info('sttn_max_load_num: user=%d capped by vram=%dMB (%dx%d frame)',
+                                effective_gap, vram, frame_info['W'], frame_info['H'])
+                    effective_gap = capped
 
             total_chunks = (frame_info['len'] + effective_gap - 1) // effective_gap
             total_written = 0
@@ -333,16 +381,22 @@ class STTNAutoInpaint:
 
                 chunk_mask = global_mask
                 chunk_area = global_area
+                chunk_tight = use_tight
                 if track_data:
                     areas = [(t["ymin"], t["ymax"], t["xmin"], t["xmax"])
                              for t in track_data if t["start"] <= end_f and t["end"] >= start_f + 1]
                     if areas:
-                        m = create_mask((frame_info['H'], frame_info['W']), areas)
-                        _, m = cv2.threshold(m, 127, 1, cv2.THRESH_BINARY)
-                        chunk_mask = m[:, :, None]
-                        chunk_area = get_inpaint_area_by_mask(frame_info['W'], frame_info['H'], split_h, chunk_mask)
+                        if use_tight:
+                            # track_data 有原始坐标时用紧凑裁剪
+                            chunk_area = get_tight_inpaint_area(areas, frame_info['W'], frame_info['H'])
+                        else:
+                            m = create_mask((frame_info['H'], frame_info['W']), areas)
+                            _, m = cv2.threshold(m, 127, 1, cv2.THRESH_BINARY)
+                            chunk_mask = m[:, :, None]
+                            chunk_area = get_inpaint_area_by_mask(frame_info['W'], frame_info['H'], split_h, chunk_mask)
                     else:
                         chunk_area = []
+                        chunk_tight = False
 
                 frames_hr, frames, comps = [], {}, {k: [] for k in range(len(chunk_area))}
                 valid_count = 0
@@ -358,7 +412,10 @@ class STTNAutoInpaint:
                     if is_frame_in_sections(j, ab_sections):
                         for k in range(len(chunk_area)):
                             a = chunk_area[k]
-                            frames.setdefault(k, []).append(cv2.resize(image[a[0]:a[1], :], (MODEL_W, MODEL_H)))
+                            if chunk_tight:
+                                frames.setdefault(k, []).append(cv2.resize(image[a[0]:a[1], a[2]:a[3], :], (MODEL_W, MODEL_H)))
+                            else:
+                                frames.setdefault(k, []).append(cv2.resize(image[a[0]:a[1], :], (MODEL_W, MODEL_H)))
 
                 if valid_count == 0:
                     if read_failed:
@@ -384,10 +441,18 @@ class STTNAutoInpaint:
                             for k in range(len(chunk_area)):
                                 if ci < len(comps[k]):
                                     a = chunk_area[k]
-                                    comp = cv2.resize(comps[k][ci], (frame_info['W'], a[1] - a[0]))
-                                    comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
-                                    m = chunk_mask[a[0]:a[1], :]
-                                    frame[a[0]:a[1], :, :] = m * comp + (1 - m) * frame[a[0]:a[1], :, :]
+                                    area_h = a[1] - a[0]
+                                    if chunk_tight:
+                                        area_w = a[3] - a[2]
+                                        comp = cv2.resize(comps[k][ci], (area_w, area_h))
+                                        comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
+                                        m = chunk_mask[a[0]:a[1], a[2]:a[3], :]
+                                        frame[a[0]:a[1], a[2]:a[3], :] = m * comp + (1 - m) * frame[a[0]:a[1], a[2]:a[3], :]
+                                    else:
+                                        comp = cv2.resize(comps[k][ci], (frame_info['W'], area_h))
+                                        comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
+                                        m = chunk_mask[a[0]:a[1], :]
+                                        frame[a[0]:a[1], :, :] = m * comp + (1 - m) * frame[a[0]:a[1], :, :]
                         writer.write(frame)
                         total_written += 1
                         if input_sub_remover:

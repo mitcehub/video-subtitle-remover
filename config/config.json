@@ -4,8 +4,7 @@
         "HardwareAcceleration": true,
         "InpaintMode": "sttn-auto",
         "SaveDirectory": "",
-        "SubtitleSelectionAreas": "0.88,0.99,0.15,0.85",
-        "UseBestRatioConstraint": true
+        "SubtitleSelectionAreas": "0.88,0.99,0.15,0.85"
     },
     "QFluentWidgets": {
         "FontFamilies": [

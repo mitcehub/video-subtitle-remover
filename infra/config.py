@@ -71,8 +71,6 @@ class Config(QConfig):
     def get_sttn_max_load_num(self):
         return max(self.sttnMaxLoadNum.value, self.sttnNeighborStride.value * self.sttnReferenceLength.value)
 
-    useBestRatioConstraint = ConfigItem("Main", "UseBestRatioConstraint", False, BoolValidator())
-
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", True, BoolValidator())
 
     checkUpdateOnStartup = ConfigItem("Main", "CheckUpdateOnStartup", True, BoolValidator())
@@ -90,6 +88,32 @@ qconfig.load(CONFIG_FILE, config)
 
 tr = configparser.ConfigParser()
 TRANSLATION_FILE = os.path.join(BASE_DIR, 'config', 'translations', f"{config.interface.value}.ini")
-tr.read(TRANSLATION_FILE, encoding='utf-8')
-if not tr.sections():
-    logger.warning('translation_file_empty_or_missing: %s', TRANSLATION_FILE)
+
+# Try to load the requested translation file
+try:
+    tr.read(TRANSLATION_FILE, encoding='utf-8')
+    if not tr.sections():
+        logger.warning('translation_file_empty_or_missing: %s', TRANSLATION_FILE)
+        # Try to load ch.ini as fallback
+        fallback_file = os.path.join(BASE_DIR, 'config', 'translations', 'ch.ini')
+        tr_fallback = configparser.ConfigParser()
+        tr_fallback.read(fallback_file, encoding='utf-8')
+        if tr_fallback.sections():
+            tr = tr_fallback
+            logger.info('Loaded fallback translation from ch.ini')
+        else:
+            logger.warning('Fallback translation file ch.ini also empty or missing')
+except Exception as e:
+    logger.warning('Failed to load translation file %s: %s', TRANSLATION_FILE, e)
+    # Try to load ch.ini as fallback
+    fallback_file = os.path.join(BASE_DIR, 'config', 'translations', 'ch.ini')
+    tr_fallback = configparser.ConfigParser()
+    try:
+        tr_fallback.read(fallback_file, encoding='utf-8')
+        if tr_fallback.sections():
+            tr = tr_fallback
+            logger.info('Loaded fallback translation from ch.ini')
+        else:
+            logger.warning('Fallback translation file ch.ini also empty or missing')
+    except Exception as e2:
+        logger.warning('Failed to load fallback translation file ch.ini: %s', e2)

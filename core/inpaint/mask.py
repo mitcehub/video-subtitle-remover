@@ -33,6 +33,83 @@ def create_mask(size, coords_list):
     return mask
 
 
+# 紧凑裁剪参数（参考 sttn-auto get_crop_region）
+TIGHT_PADDING = 30       # bbox 四周扩展像素数
+TIGHT_MIN_ASPECT = 3.0   # 最小宽高比（防止窄框导致极端变形）
+TIGHT_ALIGN = 8          # 对齐倍数（兼容 encoder 4x 下采样 + patchsize）
+
+
+def get_tight_inpaint_area(coords_list, W, H, padding=TIGHT_PADDING,
+                            min_aspect=TIGHT_MIN_ASPECT, align=TIGHT_ALIGN):
+    """围绕用户选择框计算紧凑裁剪区域（参考 sttn-auto get_crop_region）。
+
+    与全宽条带策略不同，此函数保留用户选择的 xmin/xmax 信息，
+    生成紧凑的 (ymin, ymax, xmin, xmax) 裁剪区域。
+
+    Args:
+        coords_list: 坐标列表 [(ymin, ymax, xmin, xmax), ...]
+        W: 视频帧宽度
+        H: 视频帧高度
+        padding: 选择框四周扩展像素数，默认 30
+        min_aspect: 最小宽高比，默认 3.0
+        align: 尺寸对齐倍数，默认 8
+
+    Returns:
+        紧凑裁剪区域列表 [(ymin, ymax, xmin, xmax), ...]
+    """
+    if not coords_list:
+        return []
+
+    areas = []
+    for ymin, ymax, xmin, xmax in coords_list:
+        # 1. Padding 扩展（参考 sttn-auto padding=30）
+        x1 = max(0, xmin - padding)
+        y1 = max(0, ymin - padding)
+        x2 = min(W, xmax + padding)
+        y2 = min(H, ymax + padding)
+
+        # 2. 最小宽高比保证（参考 sttn-auto min_aspect=3.0）
+        crop_w = x2 - x1
+        crop_h = y2 - y1
+        if crop_w < crop_h * min_aspect and crop_h > 0:
+            target_w = int(crop_h * min_aspect)
+            cx = (x1 + x2) // 2
+            x1_new = max(0, cx - target_w // 2)
+            x2_new = x1_new + target_w
+            if x2_new > W:
+                x2_new = W
+                x1_new = max(0, x2_new - target_w)
+            x1, x2 = x1_new, x2_new
+
+        # 3. 高度对齐（两侧均匀收缩，避免整体偏移）
+        crop_h = y2 - y1
+        remainder = crop_h % align
+        if remainder != 0:
+            half = remainder // 2
+            y1 = min(H - align, y1 + half)
+            y2 = max(y1 + align, y2 - (remainder - half))
+
+        # 4. 宽度对齐（两侧均匀收缩）
+        crop_w = x2 - x1
+        remainder_w = crop_w % align
+        if remainder_w != 0:
+            half = remainder_w // 2
+            x1 = min(W - align, x1 + half)
+            x2 = max(x1 + align, x2 - (remainder_w - half))
+
+        # 5. 最终边界检查
+        y1 = max(0, min(y1, H - 1))
+        y2 = max(y1 + align, min(y2, H))
+        x1 = max(0, min(x1, W - 1))
+        x2 = max(x1 + align, min(x2, W))
+
+        areas.append((y1, y2, x1, x2))
+
+    logger.info('get_tight_inpaint_area: input=%d boxes, output=%d areas, padding=%d, min_aspect=%.1f',
+                len(coords_list), len(areas), padding, min_aspect)
+    return areas
+
+
 def get_inpaint_area_by_mask(W, H, h, mask, multiple=1):
     """
     获取字幕去除区域，根据mask来确定需要填补的区域和高度，

@@ -1,4 +1,4 @@
-"""硬件加速检测：CUDA / DirectML / MPS / ONNX。"""
+"""硬件加速检测：CUDA / DirectML / MPS。"""
 
 import logging
 import threading
@@ -25,7 +25,6 @@ class HardwareAccelerator:
         self.__cuda = False
         self.__dml = False
         self.__mps = False
-        self.__onnx_providers = []
         self.__enabled = True
         self.__device_cached = None
 
@@ -33,7 +32,6 @@ class HardwareAccelerator:
         self._check_directml()
         self._check_cuda()
         self._check_mps()
-        self._load_onnx_providers()
         logger.info('hardware_init: name=%s, cuda=%s, dml=%s, mps=%s',
                  self.accelerator_name, self.__cuda, self.__dml, self.__mps)
 
@@ -52,26 +50,10 @@ class HardwareAccelerator:
         self.__mps = torch.backends.mps.is_available() and torch.backends.mps.is_built()
         logger.info('mps: available=%s', self.__mps)
 
-    def _load_onnx_providers(self):
-        try:
-            import onnxruntime as ort
-            supported = {
-                "DmlExecutionProvider", "ROCMExecutionProvider",
-                "MIGraphXExecutionProvider", "VitisAIExecutionProvider",
-                "OpenVINOExecutionProvider", "MetalExecutionProvider",
-                "CoreMLExecutionProvider", "CUDAExecutionProvider",
-            }
-            for provider in ort.get_available_providers():
-                if provider in supported:
-                    self.__onnx_providers.append(provider)
-                    logger.info('onnx_provider: %s', provider)
-        except ModuleNotFoundError:
-            pass
-
     def has_accelerator(self):
         if not self.__enabled:
             return False
-        return self.__cuda or self.__dml or self.__mps or len(self.__onnx_providers) > 0
+        return self.__cuda or self.__dml or self.__mps
 
     @property
     def accelerator_name(self):
@@ -83,15 +65,7 @@ class HardwareAccelerator:
             return "DirectML"
         if self.__mps:
             return "MPS"
-        if self.__onnx_providers:
-            return ", ".join(self.__onnx_providers)
         return "CPU"
-
-    @property
-    def onnx_providers(self):
-        if not self.__enabled:
-            return ["CPUExecutionProvider"]
-        return self.__onnx_providers
 
     @property
     def device(self):

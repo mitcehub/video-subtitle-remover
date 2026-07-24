@@ -236,10 +236,6 @@ if __name__ == '__main__':
     QApplication.setHighDpiScaleFactorRoundingPolicy(
     Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     # 兼容 PyQt6：无 AA_EnableHighDpiScaling（PyQt6 默认启用高 DPI），仅设置不报错
-    # 设置 Windows 任务栏 AppUserModelID，确保任务栏图标正确显示
-    if sys.platform == 'win32':
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('com.asr.app')
     app = QtWidgets.QApplication(sys.argv)
     app.setAttribute(Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings)
     # 设置应用级图标，确保 Windows 任务栏显示正确
@@ -250,6 +246,32 @@ if __name__ == '__main__':
     window.setWindowOpacity(0.0)
     window.show()
     window.load_window_position()
+
+    # Windows 任务栏图标修复：强制设置 AppUserModelID 并刷新任务栏图标
+    if sys.platform == 'win32':
+        import ctypes
+        from ctypes import wintypes
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('vsr.subtitleremover.1')
+            # 通过原生 API 强制设置窗口图标（某些 PyQt6 / qfluentwidgets 版本会丢失任务栏图标）
+            WM_SETICON = 0x0080
+            ICON_BIG = 1
+            ICON_SMALL = 0
+            icon_pixmap = QtGui.QIcon(_icon_path).pixmap(256, 256)
+            # 用延时确保 window 已完全创建
+            from PyQt6.QtCore import QTimer
+            def _force_taskbar_icon():
+                try:
+                    hicon = icon_pixmap.toHICON()
+                    hwnd = int(window.winId())
+                    ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+                    ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+                except Exception:
+                    pass
+            QTimer.singleShot(200, _force_taskbar_icon)
+        except Exception:
+            pass
+
     # 使用动画效果逐渐显示窗口
     animation = QtCore.QPropertyAnimation(window, b"windowOpacity")
     animation.setDuration(300)  # 300毫秒的动画

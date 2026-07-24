@@ -102,6 +102,58 @@ class SubtitleExtractorGUI(FluentWindow):
         # 创建界面布局
         self._create_layout()
         self._connectSignalToSlot()
+        # 标题栏显示硬件加速信息
+        self._setup_titlebar_hardware()
+
+    def _setup_titlebar_hardware(self):
+        """在标题栏标题右侧添加硬件加速信息标签。"""
+        from PyQt6.QtWidgets import QLabel
+
+        self._hw_label = QLabel(self.titleBar)
+        self._hw_label.setStyleSheet("color: #999; font-size: 11px; font-weight: normal; background: transparent;")
+
+        self._refresh_hardware_label()
+
+        # 插入到标题标签之后、弹性空间之前
+        idx = self.titleBar.hBoxLayout.indexOf(self.titleBar.titleLabel)
+        self.titleBar.hBoxLayout.insertWidget(idx + 1, self._hw_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        # 监听开关切换 → 实时刷新标题栏
+        try:
+            sw = self.homeInterface.setting_interface.hardware_acceleration.switchButton
+            sw.checkedChanged.connect(self._refresh_hardware_label)
+        except Exception:
+            pass
+
+    def _refresh_hardware_label(self):
+        """刷新标题栏硬件信息文本（读取当前配置 + 实际硬件）。"""
+        from infra.hardware import HardwareAccelerator
+        from infra.config import config
+
+        hw = HardwareAccelerator.instance()
+
+        if config.hardwareAcceleration.value:
+            # GPU 模式
+            if hw.has_cuda():
+                import torch
+                try:
+                    gpu_name = torch.cuda.get_device_name(0)
+                    free_b, total_b = torch.cuda.mem_get_info()
+                    used_gb = (total_b - free_b) / (1024 ** 3)
+                    total_gb = total_b / (1024 ** 3)
+                    text = f"GPU: {gpu_name}  |  VRAM: {used_gb:.1f}GB / {total_gb:.1f}GB"
+                except Exception:
+                    text = "GPU (CUDA)"
+            elif hw.has_mps():
+                text = "MPS (Apple GPU)"
+            elif hw.has_accelerator():
+                text = hw.accelerator_name
+            else:
+                text = "CPU（无 GPU 加速器）"
+        else:
+            text = "CPU（GPU 加速已关闭）"
+
+        self._hw_label.setText(f"  {text}  ")
 
     def _connectSignalToSlot(self):
         config.appRestartSig.connect(self._showRestartTooltip)
